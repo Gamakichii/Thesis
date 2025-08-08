@@ -31,10 +31,12 @@ function extractPostContent(postElement) {
 
 // Function to blur a specific post element
 function blurPost(postElement, postId) {
-    // Check if the post is already blurred to avoid re-blurring
     if (postElement.dataset.phishingBlurred === 'true') {
         return;
     }
+
+    // Capture current children to apply blur only to them (not the overlay)
+    const childrenToBlur = Array.from(postElement.children);
 
     // Create an overlay div
     const overlay = document.createElement('div');
@@ -56,6 +58,7 @@ function blurPost(postElement, postId) {
         font-family: 'Inter', sans-serif;
         padding: 1rem;
         box-sizing: border-box;
+        pointer-events: auto;
     `;
     overlay.innerHTML = `
         <p class="text-lg font-bold mb-2">⚠️ Potential Phishing Link Detected ⚠️</p>
@@ -65,25 +68,32 @@ function blurPost(postElement, postId) {
         </button>
     `;
 
-    // Apply blur to the post content (excluding the overlay)
-    postElement.style.filter = 'blur(8px)';
-    postElement.style.pointerEvents = 'none'; // Disable interaction with blurred content
+    // Blur only the children, not the container (so the overlay isn't blurred)
+    childrenToBlur.forEach((child) => {
+        if (child !== overlay) {
+            child.style.filter = 'blur(8px)';
+            child.style.pointerEvents = 'none';
+        }
+    });
 
     // Append the overlay to the post element
-    postElement.style.position = 'relative'; // Ensure overlay positions correctly
+    postElement.style.position = postElement.style.position || 'relative';
     postElement.appendChild(overlay);
 
     // Add event listener to the unblur button
     const unblurButton = overlay.querySelector('.unblur-button');
     unblurButton.addEventListener('click', (event) => {
-        event.stopPropagation(); // Prevent click from propagating to the blurred element
-        postElement.style.filter = 'none'; // Remove blur
-        postElement.style.pointerEvents = 'auto'; // Re-enable interaction
-        overlay.remove(); // Remove the overlay
-        postElement.dataset.phishingBlurred = 'false'; // Mark as unblurred
+        event.stopPropagation();
+        // Remove blur from children and re-enable interactions
+        childrenToBlur.forEach((child) => {
+            child.style.filter = '';
+            child.style.pointerEvents = '';
+        });
+        overlay.remove();
+        postElement.dataset.phishingBlurred = 'false';
     });
 
-    postElement.dataset.phishingBlurred = 'true'; // Mark as blurred
+    postElement.dataset.phishingBlurred = 'true';
     console.log(`Post ${postId} blurred.`);
 }
 
