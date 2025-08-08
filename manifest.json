@@ -2,34 +2,22 @@
     "manifest_version": 3,
     "name": "Facebook Phishing Detector",
     "version": "1.0",
-    "description": "Detects and blurs potential phishing links on Facebook using anomaly detection.",
-    "permissions": [
-        "activeTab",
-        "scripting",
-        "storage"
-    ],
+    "description": "Detects and blurs potential phishing links on Facebook using a hybrid AI model.",
+    "permissions": ["activeTab", "scripting", "storage"],
     "host_permissions": [
-        "https://www.facebook.com/*"
+        "https://www.facebook.com/*",
+        "http://127.0.0.1:5000/*"
     ],
     "background": {
         "service_worker": "background.js",
-        "type": "module"  
+        "type": "module"
     },
-    "action": {
-        "default_popup": "popup.html",
-        "default_icon": {
-            "16": "icons/icon16.png",
-            "48": "icons/icon48.png",
-            "128": "icons/icon128.png"
-        }
-    },
-    "content_scripts": [
-        {
-            "matches": ["https://www.facebook.com/*"],
-            "js": ["content_script.js"],
-            "run_at": "document_idle"
-        }
-    ],
+    "action": { "default_popup": "popup.html" },
+    "content_scripts": [{
+        "matches": ["https://www.facebook.com/*"],
+        "js": ["content_script.js"],
+        "run_at": "document_idle"
+    }],
     "icons": {
         "16": "icons/icon16.png",
         "48": "icons/icon48.png",
