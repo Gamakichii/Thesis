@@ -10,6 +10,8 @@ from torch_geometric.nn import GCNConv
 from gnn_simulation import get_simulated_graph_data
 import re
 import tldextract
+import json
+import os
 
 # --- Initialize App and Load Models ---
 app = Flask(__name__)
@@ -31,12 +33,26 @@ try:
             x=F.dropout(x,training=self.training)
             x=self.conv2(x,edge_index)
             return F.log_softmax(x,dim=1)
-    gnn_model = GCN(num_features=1, num_classes=2)
-    gnn_model.load_state_dict(torch.load('gnn_model.pth'))
-    gnn_model.eval()
-    graph_data = get_simulated_graph_data()
-    with torch.no_grad():
-        gnn_probs = torch.exp(gnn_model(graph_data))  # cache node probabilities
+    # Try to load precomputed real-graph artifacts first
+    gnn_probs = None
+    post_node_map = None
+    if os.path.exists('gnn_probs.npy') and os.path.exists('post_node_map.json'):
+        try:
+            gnn_probs = np.load('gnn_probs.npy')
+            with open('post_node_map.json', 'r') as f:
+                post_node_map = json.load(f)
+            print('✅ Loaded real-graph GCN artifacts (gnn_probs.npy, post_node_map.json).')
+        except Exception as e:
+            print('❌ Failed loading real-graph artifacts, falling back to simulated graph:', e)
+
+    # If real artifacts are not available, build simulated graph and cache probs
+    if gnn_probs is None:
+        gnn_model = GCN(num_features=1, num_classes=2)
+        gnn_model.load_state_dict(torch.load('gnn_model.pth'))
+        gnn_model.eval()
+        graph_data = get_simulated_graph_data()
+        with torch.no_grad():
+            gnn_probs = torch.exp(gnn_model(graph_data))  # PyTorch tensor
     print("✅ All models loaded successfully.")
 except Exception as e:
     print(f"❌ Error loading models: {e}")
@@ -138,9 +154,19 @@ def predict():
         content_score = min(error / (autoencoder_threshold * 2), 1.0)
         
         # 2. Structural Score
-        with torch.no_grad():
-            node_id = int(post_id.split('-').pop()) % 2000 + 500 # Simulate mapping to graph
-            structural_score = gnn_probs[node_id][1].item()
+        # Structural score
+        structural_score = 0.5
+        try:
+            if 'post_node_map' in globals() and post_node_map:
+                idx = post_node_map.get(str(post_id))
+                if idx is not None:
+                    structural_score = float(gnn_probs[idx]) if isinstance(gnn_probs, np.ndarray) else float(gnn_probs[idx].item())
+            else:
+                # Fallback to simulated mapping if using simulated graph
+                node_id = int(str(post_id).split('-').pop()) % 2000 + 500
+                structural_score = gnn_probs[node_id][1].item()
+        except Exception:
+            structural_score = 0.5
 
         # 3. Fuse Scores
         final_score = (content_score * 0.6) + (structural_score * 0.4)
@@ -176,9 +202,18 @@ def predict_batch():
         content_scores = np.minimum(errors / (autoencoder_threshold * 2), 1.0)
 
         # 2. Structural Scores (cached gnn_probs)
-        with torch.no_grad():
-            node_ids = [int(str(pid).split('-')[-1]) % 2000 + 500 for pid in post_ids]
-            structural_scores = np.array([float(gnn_probs[nid][1].item()) for nid in node_ids])
+        # Structural scores
+        if 'post_node_map' in globals() and post_node_map:
+            idxs = [post_node_map.get(str(pid), None) for pid in post_ids]
+            structural_scores = np.array([
+                float(gnn_probs[i]) if (i is not None and isinstance(gnn_probs, np.ndarray))
+                else (float(gnn_probs[i].item()) if i is not None else 0.5)
+                for i in idxs
+            ], dtype=float)
+        else:
+            with torch.no_grad():
+                node_ids = [int(str(pid).split('-')[-1]) % 2000 + 500 for pid in post_ids]
+                structural_scores = np.array([float(gnn_probs[nid][1].item()) for nid in node_ids])
 
         # 3. Fuse Scores
         final_scores = (0.6 * content_scores) + (0.4 * structural_scores)
