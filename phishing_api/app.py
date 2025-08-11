@@ -8,6 +8,8 @@ import torch
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 from gnn_simulation import get_simulated_graph_data
+import re
+import tldextract
 
 # --- Initialize App and Load Models ---
 app = Flask(__name__)
@@ -40,18 +42,82 @@ except Exception as e:
     print(f"❌ Error loading models: {e}")
     autoencoder_model, gnn_model, gnn_probs = None, None, None
 
-# --- CRITICAL: Feature Extraction Placeholder ---
-def extract_features_from_url(url):
-    """You MUST implement this function based on your dataset's 111 features."""
-    print(f"⚠️ Using placeholder data for feature extraction of '{url}'.")
-    return pd.DataFrame(np.random.rand(1, 111))
+def _compute_lexical_subset(url: str) -> dict:
+    u = url or ""
+    parts = tldextract.extract(u)
+    domain = ".".join([p for p in [parts.subdomain, parts.domain, parts.suffix] if p])
+    path_q = u.split(domain, 1)[-1] if domain and domain in u else ""
+    shorteners = {"bit.ly","tinyurl.com","t.co","goo.gl","ow.ly","is.gd","cutt.ly","lnkd.in","buff.ly"}
+
+    feats = {
+        "qty_dot_url": u.count("."),
+        "qty_hyphen_url": u.count("-"),
+        "qty_underline_url": u.count("_"),
+        "qty_slash_url": u.count("/"),
+        "qty_questionmark_url": u.count("?"),
+        "qty_equal_url": u.count("="),
+        "qty_at_url": u.count("@"),
+        "qty_and_url": u.count("&"),
+        "qty_exclamation_url": u.count("!"),
+        "qty_space_url": u.count(" "),
+        "qty_tilde_url": u.count("~"),
+        "qty_comma_url": u.count(","),
+        "qty_plus_url": u.count("+"),
+        "qty_asterisk_url": u.count("*"),
+        "qty_hashtag_url": u.count("#"),
+        "qty_dollar_url": u.count("$"),
+        "qty_percent_url": u.count("%"),
+        "length_url": len(u),
+        "url_shortened": int((parts.domain + "." + (parts.suffix or "")).lower() in shorteners),
+        "qty_dot_domain": domain.count("."),
+        "qty_hyphen_domain": domain.count("-"),
+        "qty_underline_domain": domain.count("_"),
+        "domain_length": len(domain),
+        "domain_in_ip": int(bool(re.match(r"^\d+\.\d+\.\d+\.\d+$", domain))),
+    }
+    # Directory/file breakdown approx
+    directory = path_q.rsplit("/", 1)[0] if "/" in path_q else ""
+    filepart = path_q.rsplit("/", 1)[-1] if "/" in path_q else path_q
+    for prefix, s in [("directory", directory), ("file", filepart)]:
+        feats[f"qty_dot_{prefix}"] = s.count(".")
+        feats[f"qty_hyphen_{prefix}"] = s.count("-")
+        feats[f"qty_underline_{prefix}"] = s.count("_")
+        feats[f"qty_slash_{prefix}"] = s.count("/")
+        feats[f"qty_questionmark_{prefix}"] = s.count("?")
+        feats[f"qty_equal_{prefix}"] = s.count("=")
+        feats[f"qty_at_{prefix}"] = s.count("@")
+        feats[f"qty_and_{prefix}"] = s.count("&")
+        feats[f"qty_exclamation_{prefix}"] = s.count("!")
+        feats[f"qty_space_{prefix}"] = s.count(" ")
+        feats[f"qty_tilde_{prefix}"] = s.count("~")
+        feats[f"qty_comma_{prefix}"] = s.count(",")
+        feats[f"qty_plus_{prefix}"] = s.count("+")
+        feats[f"qty_asterisk_{prefix}"] = s.count("*")
+        feats[f"qty_hashtag_{prefix}"] = s.count("#")
+        feats[f"qty_dollar_{prefix}"] = s.count("$")
+        feats[f"qty_percent_{prefix}"] = s.count("%")
+        feats[f"{prefix}_length"] = len(s)
+    return feats
 
 def extract_features_for_urls(urls):
-    """Batch feature extraction placeholder. Returns Nx111 DataFrame."""
+    """Return DataFrame with columns matching scaler.feature_names_in_. Missing features are filled with scaler.mean_."""
+    expected_cols = list(getattr(scaler, 'feature_names_in_', []))
+    if not expected_cols:
+        # Fallback to 111 dims
+        expected_cols = [f"f{i}" for i in range(111)]
+    base_means = getattr(scaler, 'mean_', np.zeros(len(expected_cols)))
+
     rows = []
     for u in urls:
-        rows.append(extract_features_from_url(u))
-    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(np.zeros((0,111)))
+        feats = _compute_lexical_subset(u)
+        # Start with means to avoid missing keys
+        row_vals = {col: float(base_means[i]) for i, col in enumerate(expected_cols)}
+        # Override with computed where names match expected
+        for k, v in feats.items():
+            if k in row_vals:
+                row_vals[k] = float(v)
+        rows.append(row_vals)
+    return pd.DataFrame(rows, columns=expected_cols)
 
 # --- API Endpoint ---
 @app.route('/predict', methods=['POST'])
@@ -66,7 +132,7 @@ def predict():
 
     try:
         # 1. Content Score
-        features = extract_features_from_url(url)
+        features = extract_features_for_urls([url])
         scaled_features = scaler.transform(features)
         error = np.mean(np.square(scaled_features - autoencoder_model.predict(scaled_features, verbose=0)))
         content_score = min(error / (autoencoder_threshold * 2), 1.0)
