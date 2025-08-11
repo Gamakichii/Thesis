@@ -215,16 +215,29 @@ async function getBackendPredictionForLink(url, postId) {
     }
 }
 
-// Aggregates per-link predictions into a per-post decision
+// Aggregates per-link predictions using batch endpoint
 async function getMLPrediction(postText, postLinks, postId) {
-    if (!postLinks || postLinks.length === 0) {
-        return { isPhishing: false, flaggedLinks: [] };
+    try {
+        if (!postLinks || postLinks.length === 0) {
+            return { isPhishing: false, flaggedLinks: [] };
+        }
+        const items = postLinks.map((url) => ({ url, post_id: postId }));
+        const response = await fetch('http://127.0.0.1:5000/predict_batch', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items })
+        });
+        if (!response.ok) throw new Error(`batch status ${response.status}`);
+        const data = await response.json();
+        const flagged = (data.predictions || []).filter(p => p.is_phishing).map(p => p.url);
+        // Update cache for each url
+        (data.predictions || []).forEach(p => setCachedPrediction(String(p.url || '').toLowerCase(), { is_phishing: !!p.is_phishing }));
+        return { isPhishing: flagged.length > 0, flaggedLinks: flagged };
+    } catch (e) {
+        console.warn('Batch prediction failed, falling back per-link', e);
+        const results = await Promise.all(postLinks.map(async (link) => ({ link, res: await getBackendPredictionForLink(link, postId) })));
+        const flaggedLinks = results.filter(({ res }) => !!res && res.is_phishing).map(({ link }) => link);
+        return { isPhishing: flaggedLinks.length > 0, flaggedLinks };
     }
-    const results = await Promise.all(
-        postLinks.map(async (link) => ({ link, res: await getBackendPredictionForLink(link, postId) }))
-    );
-    const flaggedLinks = results.filter(({ res }) => !!res && res.is_phishing).map(({ link }) => link);
-    return { isPhishing: flaggedLinks.length > 0, flaggedLinks };
 }
 
 // --- Background Script Logic ---
@@ -383,16 +396,38 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 console.log("Background service worker loaded.");
 
+function isFacebookUrl(url) {
+    return /https?:\/\/([a-z0-9-]+\.)*facebook\.com\//i.test(url || "");
+}
+
+function ensureContentScriptAndScan(tabId) {
+    // Try to ping the content script; if not present, inject then retry
+    try {
+        chrome.tabs.sendMessage(tabId, { action: "scanPageFromBackground" }, () => {
+            if (chrome.runtime.lastError) {
+                // Fallback: inject content script then retry once
+                chrome.scripting.executeScript({ target: { tabId }, files: ["content_script.js"] }, () => {
+                    setTimeout(() => {
+                        chrome.tabs.sendMessage(tabId, { action: "scanPageFromBackground" }, () => {});
+                    }, 200);
+                });
+            }
+        });
+    } catch (e) {
+        console.warn('ensureContentScriptAndScan error', e);
+    }
+}
+
 // Auto-scan: trigger scans on tab activation, tab updates, and SPA navigations
 function triggerScanOnActiveFacebookTab() {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         const tab = tabs && tabs[0];
         if (!tab || !tab.url) return;
-        if (!/https?:\/\/([a-z0-9-]+\.)*facebook\.com\//i.test(tab.url)) return;
-        chrome.tabs.sendMessage(tab.id, { action: "scanPageFromBackground" }, () => {});
+        if (!isFacebookUrl(tab.url)) return;
+        ensureContentScriptAndScan(tab.id);
         // Also trigger a second scan shortly after to catch lazy-loaded posts
         setTimeout(() => {
-            chrome.tabs.sendMessage(tab.id, { action: "scanPageFromBackground" }, () => {});
+            ensureContentScriptAndScan(tab.id);
         }, 1200);
     });
 }
@@ -402,20 +437,20 @@ chrome.tabs.onActivated.addListener(() => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    if (changeInfo.status === 'complete' && tab && tab.url && /https?:\/\/([a-z0-9-]+\.)*facebook\.com\//i.test(tab.url)) {
-        chrome.tabs.sendMessage(tabId, { action: "scanPageFromBackground" }, () => {});
+    if (changeInfo.status === 'complete' && tab && tab.url && isFacebookUrl(tab.url)) {
+        ensureContentScriptAndScan(tabId);
         setTimeout(() => {
-            chrome.tabs.sendMessage(tabId, { action: "scanPageFromBackground" }, () => {});
+            ensureContentScriptAndScan(tabId);
         }, 1200);
     }
 });
 
 if (chrome.webNavigation && chrome.webNavigation.onHistoryStateUpdated) {
     chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
-        if (details && details.url && /https?:\/\/([a-z0-9-]+\.)*facebook\.com\//i.test(details.url)) {
-            chrome.tabs.sendMessage(details.tabId, { action: "scanPageFromBackground" }, () => {});
+        if (details && details.url && isFacebookUrl(details.url)) {
+            ensureContentScriptAndScan(details.tabId);
             setTimeout(() => {
-                chrome.tabs.sendMessage(details.tabId, { action: "scanPageFromBackground" }, () => {});
+                ensureContentScriptAndScan(details.tabId);
             }, 1200);
         }
     });

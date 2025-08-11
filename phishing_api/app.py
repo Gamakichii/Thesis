@@ -33,16 +33,25 @@ try:
     gnn_model.load_state_dict(torch.load('gnn_model.pth'))
     gnn_model.eval()
     graph_data = get_simulated_graph_data()
+    with torch.no_grad():
+        gnn_probs = torch.exp(gnn_model(graph_data))  # cache node probabilities
     print("✅ All models loaded successfully.")
 except Exception as e:
     print(f"❌ Error loading models: {e}")
-    autoencoder_model, gnn_model = None, None
+    autoencoder_model, gnn_model, gnn_probs = None, None, None
 
 # --- CRITICAL: Feature Extraction Placeholder ---
 def extract_features_from_url(url):
     """You MUST implement this function based on your dataset's 111 features."""
     print(f"⚠️ Using placeholder data for feature extraction of '{url}'.")
     return pd.DataFrame(np.random.rand(1, 111))
+
+def extract_features_for_urls(urls):
+    """Batch feature extraction placeholder. Returns Nx111 DataFrame."""
+    rows = []
+    for u in urls:
+        rows.append(extract_features_from_url(u))
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(np.zeros((0,111)))
 
 # --- API Endpoint ---
 @app.route('/predict', methods=['POST'])
@@ -65,8 +74,7 @@ def predict():
         # 2. Structural Score
         with torch.no_grad():
             node_id = int(post_id.split('-').pop()) % 2000 + 500 # Simulate mapping to graph
-            probs = torch.exp(gnn_model(graph_data))
-            structural_score = probs[node_id][1].item()
+            structural_score = gnn_probs[node_id][1].item()
 
         # 3. Fuse Scores
         final_score = (content_score * 0.6) + (structural_score * 0.4)
@@ -74,6 +82,46 @@ def predict():
         
         print(f"URL: {url} | Final Score: {final_score:.2f} -> Phishing: {is_phishing}")
         return jsonify({'is_phishing': is_phishing})
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# --- Batch Prediction Endpoint ---
+@app.route('/predict_batch', methods=['POST'])
+def predict_batch():
+    if not all([autoencoder_model, gnn_model]):
+        return jsonify({'error': 'Models not ready'}), 500
+
+    data = request.get_json() or {}
+    items = data.get('items') or []  # list of {url, post_id}
+    if not isinstance(items, list) or len(items) == 0:
+        return jsonify({'predictions': []})
+
+    try:
+        urls = [it.get('url') for it in items]
+        post_ids = [it.get('post_id') for it in items]
+
+        # 1. Content Scores (vectorized)
+        feats = extract_features_for_urls(urls)
+        scaled = scaler.transform(feats)
+        recon = autoencoder_model.predict(scaled, verbose=0)
+        errors = np.mean(np.square(scaled - recon), axis=1)
+        content_scores = np.minimum(errors / (autoencoder_threshold * 2), 1.0)
+
+        # 2. Structural Scores (cached gnn_probs)
+        with torch.no_grad():
+            node_ids = [int(str(pid).split('-')[-1]) % 2000 + 500 for pid in post_ids]
+            structural_scores = np.array([float(gnn_probs[nid][1].item()) for nid in node_ids])
+
+        # 3. Fuse Scores
+        final_scores = (0.6 * content_scores) + (0.4 * structural_scores)
+        preds = (final_scores > 0.5).tolist()
+
+        return jsonify({'predictions': [
+            { 'url': url, 'post_id': pid, 'is_phishing': pred }
+            for url, pid, pred in zip(urls, post_ids, preds)
+        ]})
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
