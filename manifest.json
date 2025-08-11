@@ -32,6 +32,6 @@
         "128": "icons/icon128.png"
     },
     "content_security_policy": {
-        "extension_pages": "script-src 'self'; object-src 'self'; style-src 'self' https://cdn.tailwindcss.com"
+        "extension_pages": "script-src 'self' 'unsafe-eval' https://cdn.tailwindcss.com; object-src 'self'; style-src 'self' 'unsafe-inline'"
     }
 }
