@@ -64,8 +64,8 @@ initializeFirebase();
 
 // Collection path for flagged links (public data for sharing)
 function getFlaggedLinksCollectionRef() {
-    if (!db || !userId) {
-        console.error("Firestore not initialized or userId not available.");
+    if (!db) {
+        console.error("Firestore not initialized.");
         return null;
     }
     // Using public collection as per instructions for shared data
@@ -74,11 +74,11 @@ function getFlaggedLinksCollectionRef() {
 
 // Graph collections
 function getGraphNodesCollectionRef() {
-    if (!db || !userId) return null;
+    if (!db) return null;
     return collection(db, `artifacts/${appId}/private/graph/nodes`);
 }
 function getGraphEdgesCollectionRef() {
-    if (!db || !userId) return null;
+    if (!db) return null;
     return collection(db, `artifacts/${appId}/private/graph/edges`);
 }
 
@@ -113,8 +113,8 @@ function userNodeId(uid) { return `user:${uid}`; }
 
 // Add a collection for user reports (private by rules)
 function getUserReportsCollectionRef() {
-    if (!db || !userId) {
-        console.error("Firestore not initialized or userId not available.");
+    if (!db) {
+        console.error("Firestore not initialized.");
         return null;
     }
     return collection(db, `artifacts/${appId}/private/user_reports`);
@@ -127,7 +127,7 @@ async function addUserReport(type, payload) {
         await addDoc(collectionRef, {
             type,
             payload,
-            userId,
+            userId: userId || 'anon',
             timestamp: new Date()
         });
         return true;
@@ -146,7 +146,7 @@ async function addFlaggedLink(linkUrl, detectedByUserId) {
         await addDoc(collectionRef, {
             url: linkUrl,
             timestamp: new Date(),
-            userId: detectedByUserId // Store which user flagged it
+            userId: detectedByUserId || 'anon' // Store which user flagged it
         });
         console.log(`Firestore: Added flagged link: ${linkUrl}`);
         return true;
@@ -326,10 +326,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 const links = Array.isArray(request.links) ? request.links : [];
                 // Report each link as false negative; if none, still log postId
                 if (links.length === 0) {
-                    await addUserReport('false_negative', { postId: request.postId });
+                    await addUserReport('false_negative', { postId: request.postId, source: 'manual' });
                 } else {
                     for (const url of links) {
-                        await addUserReport('false_negative', { url, postId: request.postId });
+                        await addUserReport('false_negative', { url, postId: request.postId, source: 'manual' });
                     }
                 }
                 // Optionally also store under flagged links (public)
