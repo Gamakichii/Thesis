@@ -278,14 +278,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 // Initial scan when the content script loads (page is idle)
 scanAndSendPosts();
 
+let scanDebounceHandle = null;
+function requestScanDebounced(delay = 400) {
+    if (scanDebounceHandle) clearTimeout(scanDebounceHandle);
+    scanDebounceHandle = setTimeout(() => {
+        scanDebounceHandle = null;
+        scanAndSendPosts();
+    }, delay);
+}
+
 const observer = new MutationObserver((mutations) => {
-    mutations.forEach((mutation) => {
-        if (mutation.addedNodes.length > 0) {
-            // A small delay to ensure the content is fully rendered
-            // and to avoid excessive scanning on rapid DOM changes
-            setTimeout(scanAndSendPosts, 300); // Reduced delay
+    for (const mutation of mutations) {
+        if (mutation.addedNodes && mutation.addedNodes.length > 0) {
+            requestScanDebounced(500);
+            break;
         }
-    });
+    }
 });
 
 // Observe the document body for changes in its children (where new posts would appear)

@@ -174,9 +174,28 @@ async function getAllFlaggedLinks() {
 }
 
 // --- Backend ML Model Prediction ---
+const PREDICTION_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const predictionCache = new Map(); // key: urlLower -> { is_phishing, ts }
+
+function getCachedPrediction(urlLower) {
+    const entry = predictionCache.get(urlLower);
+    if (!entry) return null;
+    if (Date.now() - entry.ts > PREDICTION_TTL_MS) {
+        predictionCache.delete(urlLower);
+        return null;
+    }
+    return entry;
+}
+
+function setCachedPrediction(urlLower, value) {
+    predictionCache.set(urlLower, { ...value, ts: Date.now() });
+}
 
 async function getBackendPredictionForLink(url, postId) {
     try {
+        const urlLower = String(url || '').toLowerCase();
+        const cached = getCachedPrediction(urlLower);
+        if (cached) return { is_phishing: !!cached.is_phishing };
         const response = await fetch('http://127.0.0.1:5000/predict', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -188,6 +207,7 @@ async function getBackendPredictionForLink(url, postId) {
             return { is_phishing: false };
         }
         const data = await response.json();
+        setCachedPrediction(urlLower, { is_phishing: !!data.is_phishing });
         return data; // { is_phishing: boolean }
     } catch (e) {
         console.error('Network error calling backend /predict:', e);
@@ -368,7 +388,7 @@ function triggerScanOnActiveFacebookTab() {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         const tab = tabs && tabs[0];
         if (!tab || !tab.url) return;
-        if (!/https?:\/\/(www\.)?facebook\.com\//i.test(tab.url)) return;
+        if (!/https?:\/\/([a-z0-9-]+\.)*facebook\.com\//i.test(tab.url)) return;
         chrome.tabs.sendMessage(tab.id, { action: "scanPageFromBackground" }, () => {});
     });
 }
@@ -378,14 +398,14 @@ chrome.tabs.onActivated.addListener(() => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    if (changeInfo.status === 'complete' && tab && tab.url && /https?:\/\/(www\.)?facebook\.com\//i.test(tab.url)) {
+    if (changeInfo.status === 'complete' && tab && tab.url && /https?:\/\/([a-z0-9-]+\.)*facebook\.com\//i.test(tab.url)) {
         chrome.tabs.sendMessage(tabId, { action: "scanPageFromBackground" }, () => {});
     }
 });
 
 if (chrome.webNavigation && chrome.webNavigation.onHistoryStateUpdated) {
     chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
-        if (details && details.url && /https?:\/\/(www\.)?facebook\.com\//i.test(details.url)) {
+        if (details && details.url && /https?:\/\/([a-z0-9-]+\.)*facebook\.com\//i.test(details.url)) {
             chrome.tabs.sendMessage(details.tabId, { action: "scanPageFromBackground" }, () => {});
         }
     });
