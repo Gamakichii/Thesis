@@ -70,6 +70,45 @@ function getFlaggedLinksCollectionRef() {
     return collection(db, `artifacts/${appId}/public/data/flagged_phishing_links`);
 }
 
+// Graph collections
+function getGraphNodesCollectionRef() {
+    if (!db || !userId) return null;
+    return collection(db, `artifacts/${appId}/private/graph/nodes`);
+}
+function getGraphEdgesCollectionRef() {
+    if (!db || !userId) return null;
+    return collection(db, `artifacts/${appId}/private/graph/edges`);
+}
+
+async function upsertGraphNode(nodeId, data) {
+    const colRef = getGraphNodesCollectionRef();
+    if (!colRef) return false;
+    try {
+        const nodeRef = doc(db, `artifacts/${appId}/private/graph/nodes/${nodeId}`);
+        await setDoc(nodeRef, { ...data, updatedAt: new Date() }, { merge: true });
+        return true;
+    } catch (e) {
+        console.error('Firestore: upsert node failed', e);
+        return false;
+    }
+}
+
+async function addGraphEdge(edge) {
+    const colRef = getGraphEdgesCollectionRef();
+    if (!colRef) return false;
+    try {
+        await addDoc(colRef, { ...edge, userId, ts: new Date() });
+        return true;
+    } catch (e) {
+        console.error('Firestore: add edge failed', e);
+        return false;
+    }
+}
+
+function postNodeId(postId) { return `post:${postId}`; }
+function domainNodeId(domain) { return `domain:${domain}`; }
+function userNodeId(uid) { return `user:${uid}`; }
+
 // Add a collection for user reports (private by rules)
 function getUserReportsCollectionRef() {
     if (!db || !userId) {
@@ -256,6 +295,39 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // Message from popup to get the current user ID
         sendResponse({ userId: userId });
         return true; // Indicate that sendResponse will be called asynchronously
+    } else if (request.action === 'graphIngestPost') {
+        (async () => {
+            try {
+                const { postId, author, ts, domains = [], counts = {} } = request;
+                await upsertGraphNode(userNodeId(userId), { type: 'user', userId });
+                await upsertGraphNode(postNodeId(postId), { type: 'post', postId, author: author || null, ts: ts || Date.now(), domains, counts });
+                for (const d of domains) {
+                    await upsertGraphNode(domainNodeId(d), { type: 'domain', domain: d });
+                    await addGraphEdge({ src: postNodeId(postId), dst: domainNodeId(d), edgeType: 'contains' });
+                }
+                await addGraphEdge({ src: userNodeId(userId), dst: postNodeId(postId), edgeType: 'view' });
+                sendResponse({ status: 'ok' });
+            } catch (e) {
+                console.error('graphIngestPost error', e);
+                sendResponse({ status: 'error', message: String(e) });
+            }
+        })();
+        return true;
+    } else if (request.action === 'graphClick') {
+        (async () => {
+            try {
+                const { domain, postId = null } = request;
+                if (!domain) { sendResponse({ status: 'error', message: 'missing domain' }); return; }
+                await upsertGraphNode(userNodeId(userId), { type: 'user', userId });
+                await upsertGraphNode(domainNodeId(domain), { type: 'domain', domain });
+                await addGraphEdge({ src: userNodeId(userId), dst: domainNodeId(domain), edgeType: 'click', postId });
+                sendResponse({ status: 'ok' });
+            } catch (e) {
+                console.error('graphClick error', e);
+                sendResponse({ status: 'error', message: String(e) });
+            }
+        })();
+        return true;
     }
 });
 

@@ -198,6 +198,21 @@ async function scanAndSendPosts() {
                     links: content.links,
                 });
                 processedPostIds.add(postId); // Mark as processed
+
+                // Graph ingestion: send minimal post + domains info to background
+                try {
+                    const domains = Array.from(new Set((content.links || []).map(h => {
+                        try { return new URL(h).hostname; } catch { return null; }
+                    }).filter(Boolean)));
+                    chrome.runtime.sendMessage({
+                        action: 'graphIngestPost',
+                        postId,
+                        author: null,
+                        ts: Date.now(),
+                        domains,
+                        counts: { reactions: null, comments: null, shares: null }
+                    });
+                } catch (_) {}
             }
         }
     });
@@ -261,3 +276,27 @@ const observer = new MutationObserver((mutations) => {
 observer.observe(document.body, { childList: true, subtree: true });
 
 console.log("Content script loaded and observing.");
+
+// Global click listener to capture external link clicks for graph edges
+let graphClickListenerAdded = false;
+if (!graphClickListenerAdded) {
+    graphClickListenerAdded = true;
+    document.addEventListener('click', (e) => {
+        const linkEl = e.target && (e.target.closest ? e.target.closest('a[href]') : null);
+        if (!linkEl) return;
+        const href = linkEl.getAttribute('href') || '';
+        try {
+            const absoluteUrl = new URL(href, location.href);
+            const hostname = absoluteUrl.hostname || '';
+            if (/facebook\.com|fb\.com/i.test(hostname)) return;
+            const postContainer = linkEl.closest('[data-phishing-post-id]');
+            const postId = postContainer ? postContainer.dataset.phishingPostId : null;
+            chrome.runtime.sendMessage({
+                action: 'graphClick',
+                url: absoluteUrl.href,
+                domain: hostname,
+                postId
+            });
+        } catch (_) {}
+    }, true);
+}
