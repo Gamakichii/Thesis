@@ -7,9 +7,12 @@ import tensorflow as tf
 import torch
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
+
+# --- NEW: Import the real feature extractor ---
+from feature_extractor import extract_features_from_url
 from gnn_simulation import get_simulated_graph_data
 
-# --- Initialize App and Load Models ---
+# --- Initialize App and Load Models (Same as before) ---
 app = Flask(__name__)
 CORS(app)
 
@@ -17,6 +20,7 @@ try:
     autoencoder_model = tf.keras.models.load_model('phishing_autoencoder_model.h5')
     with open('scaler.pkl', 'rb') as f: scaler = pickle.load(f)
     with open('autoencoder_threshold.txt', 'r') as f: autoencoder_threshold = float(f.read())
+    
     class GCN(torch.nn.Module):
         def __init__(self,num_features,num_classes):
             super(GCN,self).__init__()
@@ -28,6 +32,7 @@ try:
             x=F.dropout(x,training=self.training)
             x=self.conv2(x,edge_index)
             return F.log_softmax(x,dim=1)
+            
     gnn_model = GCN(num_features=1, num_classes=2)
     gnn_model.load_state_dict(torch.load('gnn_model.pth'))
     gnn_model.eval()
@@ -37,37 +42,35 @@ except Exception as e:
     print(f"❌ Error loading models: {e}")
     autoencoder_model, gnn_model = None, None
 
-# --- CRITICAL: Feature Extraction Placeholder ---
-def extract_features_from_url(url):
-    """You MUST implement this function based on your dataset's 111 features."""
-    print(f"⚠️ Using placeholder data for feature extraction of '{url}'.")
-    return pd.DataFrame(np.random.rand(1, 111))
-
-# --- API Endpoint ---
+# --- API Endpoint (Now uses the real extractor) ---
 @app.route('/predict', methods=['POST'])
 def predict():
     if not all([autoencoder_model, gnn_model]):
-        return jsonify({'error': 'Models not ready'}), 500
+        return jsonify({'error': 'Models not loaded'}), 500
     
     data = request.get_json()
-    url, post_id = data.get('url'), data.get('post_id')
+    url = data.get('url')
+    post_id = data.get('post_id')
     if not url or not post_id:
         return jsonify({'error': 'Missing "url" or "post_id"'}), 400
 
     try:
-        # 1. Content Score
-        features = extract_features_from_url(url)
-        scaled_features = scaler.transform(features)
-        error = np.mean(np.square(scaled_features - autoencoder_model.predict(scaled_features, verbose=0)))
+        # --- 1. Content Score from Autoencoder ---
+        # Use the real feature extractor instead of the placeholder
+        features_df = extract_features_from_url(url)
+        
+        scaled_features = scaler.transform(features_df)
+        reconstruction = autoencoder_model.predict(scaled_features, verbose=0)
+        error = np.mean(np.square(scaled_features - reconstruction), axis=1)[0]
         content_score = min(error / (autoencoder_threshold * 2), 1.0)
         
-        # 2. Structural Score
+        # --- 2. Structural Score from GNN ---
         with torch.no_grad():
-            node_id = int(post_id.split('-').pop()) % 2000 + 500 # Simulate mapping to graph
+            node_id = int(post_id.split('-').pop()) % 2000 + 500 # Simulate mapping
             probs = torch.exp(gnn_model(graph_data))
             structural_score = probs[node_id][1].item()
 
-        # 3. Fuse Scores
+        # --- 3. Fuse Scores ---
         final_score = (content_score * 0.6) + (structural_score * 0.4)
         is_phishing = final_score > 0.5
         
@@ -75,7 +78,8 @@ def predict():
         return jsonify({'is_phishing': is_phishing})
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        print(f"Prediction Error: {e}")
+        return jsonify({'error': 'Failed to process URL.'}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
