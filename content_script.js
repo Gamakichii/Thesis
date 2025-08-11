@@ -16,7 +16,7 @@ function extractPostContent(postElement) {
         text = textElement.textContent;
     }
 
-    // Try to get links from common areas
+    // Try to get links from common areas (anchor tags)
     const linkElements = postElement.querySelectorAll('a[href]');
     linkElements.forEach(link => {
         const href = link.href;
@@ -26,7 +26,22 @@ function extractPostContent(postElement) {
         }
     });
 
-    return { text, links };
+    // Also extract URLs present as plain text in captions
+    try {
+        const urlRegex = /(?:https?:\/\/|www\.)[^\s<>)"']+/gi;
+        const candidates = (text || '').match(urlRegex) || [];
+        candidates.forEach(u => {
+            let href = u;
+            if (href.startsWith('www.')) href = 'https://' + href;
+            if (href && !href.includes('facebook.com') && !href.includes('fb.com')) {
+                links.push(href);
+            }
+        });
+    } catch (_) {}
+
+    // Heuristic: if any link looks dangerous, mark for instant blur
+    const instant = links.some(linkLooksSuspicious);
+    return { text, links, instant };
 }
 
 function linkLooksSuspicious(url) {
@@ -48,12 +63,18 @@ function linkLooksSuspicious(url) {
 
 // Function to blur a specific post element
 function blurPost(postElement, postId) {
-    if (postElement.dataset.phishingBlurred === 'true') {
-        return;
-    }
+    if (postElement.dataset.phishingBlurred === 'true') return;
+    if (!postElement) return;
 
     // Capture current children to apply blur only to them (not the overlay)
-    const childrenToBlur = Array.from(postElement.children);
+    // Prefer blurring the inner content wrapper if present for speed
+    let childrenToBlur = [];
+    const contentWrapper = postElement.querySelector('[role="feed"], div[dir="auto"], div[data-ad-preview], div.x1lliihq');
+    if (contentWrapper) {
+        childrenToBlur = Array.from(contentWrapper.children);
+    } else {
+        childrenToBlur = Array.from(postElement.children);
+    }
 
     // Remove any non-blur controls if present
     const existingNonBlurControls = postElement.querySelector('.post-nonblur-malicious');
@@ -249,7 +270,7 @@ async function scanAndSendPosts() {
 
                 // Optimistic, fast pre-blur for clearly suspicious links
                 try {
-                    if (content.links.some(linkLooksSuspicious)) {
+                    if (content.instant) {
                         blurPost(postElement, postId);
                     }
                 } catch (_) {}
