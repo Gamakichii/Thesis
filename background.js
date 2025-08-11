@@ -5,7 +5,7 @@ import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnap
 
 // Global Firebase variables (provided by Canvas environment)
   // background.js
-  const appId = 'yads-phishing-link'; // e.g., 'prod' or your Firebase project ID
+  const appId = 'ads-phishing-link'; // e.g., 'prod' or your Firebase project ID
   const firebaseConfig = {
     apiKey: "AIzaSyB9FgbYrbiKZ7Z8LaPZprDtndSjgY7YDq8",
     authDomain: "ads-phishing-link.firebaseapp.com",
@@ -16,6 +16,8 @@ import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnap
     measurementId: "G-79ECP9L5YV"
   };
   const initialAuthToken = null; // keep null; we use anonymous auth
+  // Backend API base URL (can be overridden by page-injected global __api_base)
+  const API_BASE_URL = typeof __api_base !== 'undefined' ? __api_base : 'http://127.0.0.1:5000';
 
 let app;
 let db;
@@ -196,7 +198,7 @@ async function getBackendPredictionForLink(url, postId) {
         const urlLower = String(url || '').toLowerCase();
         const cached = getCachedPrediction(urlLower);
         if (cached) return { is_phishing: !!cached.is_phishing };
-        const response = await fetch('http://127.0.0.1:5000/predict', {
+        const response = await fetch(`${API_BASE_URL}/predict`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url, post_id: postId })
@@ -222,7 +224,7 @@ async function getMLPrediction(postText, postLinks, postId) {
             return { isPhishing: false, flaggedLinks: [] };
         }
         const items = postLinks.map((url) => ({ url, post_id: postId }));
-        const response = await fetch('http://127.0.0.1:5000/predict_batch', {
+        const response = await fetch(`${API_BASE_URL}/predict_batch`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ items })
         });
