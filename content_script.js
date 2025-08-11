@@ -38,6 +38,10 @@ function blurPost(postElement, postId) {
     // Capture current children to apply blur only to them (not the overlay)
     const childrenToBlur = Array.from(postElement.children);
 
+    // Remove any non-blur controls if present
+    const existingNonBlurControls = postElement.querySelector('.post-nonblur-malicious');
+    if (existingNonBlurControls) existingNonBlurControls.remove();
+
     // Create an overlay div
     const overlay = document.createElement('div');
     overlay.style.cssText = `
@@ -67,9 +71,6 @@ function blurPost(postElement, postId) {
             <button class="unblur-button bg-red-500 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-full shadow-lg transition-all duration-200 ease-in-out">
                 View Post Anyway
             </button>
-            <button class="report-safe-button bg-gray-600 hover:bg-gray-700 text-white font-semibold py-2 px-4 rounded-full shadow-lg transition-all duration-200 ease-in-out">
-                Report as Safe
-            </button>
         </div>
     `;
 
@@ -96,59 +97,71 @@ function blurPost(postElement, postId) {
         });
         overlay.remove();
         postElement.dataset.phishingBlurred = 'false';
-        addReblurButton(postElement, postId);
-    });
-
-    // Add event listener to the report-as-safe (false positive) button
-    const reportSafeButton = overlay.querySelector('.report-safe-button');
-    reportSafeButton.addEventListener('click', (event) => {
-        event.stopPropagation();
-        try {
-            const encodedLinks = postElement.dataset.phishingLinks || '[]';
-            const links = JSON.parse(encodedLinks);
-            chrome.runtime.sendMessage({
-                action: 'reportFalsePositive',
-                postId,
-                links
-            });
-        } catch (_) {
-            chrome.runtime.sendMessage({ action: 'reportFalsePositive', postId, links: [] });
-        }
+        addPostUnblurControls(postElement, postId);
     });
 
     postElement.dataset.phishingBlurred = 'true';
     console.log(`Post ${postId} blurred.`);
 }
 
-function addReblurButton(postElement, postId) {
-    // Remove existing reblur button if present
-    const existingBtn = postElement.querySelector('.reblur-button');
-    if (existingBtn) existingBtn.remove();
+function addPostUnblurControls(postElement, postId) {
+    // Remove existing controls if present
+    const existing = postElement.querySelector('.post-unblur-controls');
+    if (existing) existing.remove();
 
-    const btn = document.createElement('button');
-    btn.className = 'reblur-button';
-    btn.textContent = 'Re-blur';
-    btn.style.cssText = `
+    const wrapper = document.createElement('div');
+    wrapper.className = 'post-unblur-controls';
+    wrapper.style.cssText = `
         position: absolute;
         top: 8px;
         right: 8px;
         z-index: 10000;
-        background: rgba(66, 103, 178, 0.95);
-        color: #fff;
-        border: none;
-        border-radius: 16px;
-        padding: 6px 10px;
-        font-size: 12px;
-        cursor: pointer;
+        display: flex;
+        gap: 8px;
     `;
-    btn.addEventListener('click', (e) => {
+
+    const safeBtn = document.createElement('button');
+    safeBtn.textContent = 'Mark as Safe';
+    safeBtn.style.cssText = `
+        background: #16a34a; color: #fff; border: none; border-radius: 16px;
+        padding: 6px 10px; font-size: 12px; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    `;
+    safeBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        // Remove button before re-blur to avoid double overlays
-        btn.remove();
+        try {
+            const encodedLinks = postElement.dataset.phishingLinks || '[]';
+            const links = JSON.parse(encodedLinks);
+            chrome.runtime.sendMessage({ action: 'reportFalsePositive', postId, links });
+        } catch (_) {
+            chrome.runtime.sendMessage({ action: 'reportFalsePositive', postId, links: [] });
+        }
+        wrapper.remove();
+    });
+
+    const malBtn = document.createElement('button');
+    malBtn.textContent = 'Mark as Malicious';
+    malBtn.style.cssText = `
+        background: #dc2626; color: #fff; border: none; border-radius: 16px;
+        padding: 6px 10px; font-size: 12px; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    `;
+    malBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        try {
+            const encodedLinks = postElement.dataset.phishingLinks || '[]';
+            const links = JSON.parse(encodedLinks);
+            chrome.runtime.sendMessage({ action: 'confirmPhishing', postId, links });
+        } catch (_) {
+            chrome.runtime.sendMessage({ action: 'confirmPhishing', postId, links: [] });
+        }
+        wrapper.remove();
+        // Re-blur the post automatically
         blurPost(postElement, postId);
     });
+
+    wrapper.appendChild(safeBtn);
+    wrapper.appendChild(malBtn);
     postElement.style.position = postElement.style.position || 'relative';
-    postElement.appendChild(btn);
+    postElement.appendChild(wrapper);
 }
 
 function getFacebookPostElements() {
@@ -213,6 +226,9 @@ async function scanAndSendPosts() {
                         counts: { reactions: null, comments: null, shares: null }
                     });
                 } catch (_) {}
+
+                // Add non-blur control so user can mark as malicious if we miss it
+                addNonBlurMaliciousControl(postElement, postId);
             }
         }
     });
@@ -299,4 +315,36 @@ if (!graphClickListenerAdded) {
             });
         } catch (_) {}
     }, true);
+}
+
+function addNonBlurMaliciousControl(postElement, postId) {
+    // If already blurred, skip
+    if (postElement.dataset.phishingBlurred === 'true') return;
+    // Avoid duplicates
+    const existing = postElement.querySelector('.post-nonblur-malicious');
+    if (existing) return;
+
+    const btn = document.createElement('button');
+    btn.className = 'post-nonblur-malicious';
+    btn.textContent = 'Mark as Malicious';
+    btn.style.cssText = `
+        position: absolute; top: 8px; right: 8px; z-index: 10000;
+        background: #dc2626; color: #fff; border: none; border-radius: 16px;
+        padding: 6px 10px; font-size: 12px; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    `;
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        try {
+            const encodedLinks = postElement.dataset.phishingLinks || '[]';
+            const links = JSON.parse(encodedLinks);
+            chrome.runtime.sendMessage({ action: 'confirmPhishing', postId, links });
+        } catch (_) {
+            chrome.runtime.sendMessage({ action: 'confirmPhishing', postId, links: [] });
+        }
+        // Blur the post since user marked it malicious
+        btn.remove();
+        blurPost(postElement, postId);
+    });
+    postElement.style.position = postElement.style.position || 'relative';
+    postElement.appendChild(btn);
 }

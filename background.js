@@ -284,6 +284,36 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             }
         })();
         return true;
+    } else if (request.action === 'confirmPhishing') {
+        // User manually marks a post as malicious (FN capture)
+        (async () => {
+            try {
+                const links = Array.isArray(request.links) ? request.links : [];
+                // Report each link as false negative; if none, still log postId
+                if (links.length === 0) {
+                    await addUserReport('false_negative', { postId: request.postId });
+                } else {
+                    for (const url of links) {
+                        await addUserReport('false_negative', { url, postId: request.postId });
+                    }
+                }
+                // Optionally also store under flagged links (public)
+                for (const link of links) {
+                    await addFlaggedLink(link, userId);
+                }
+                // Ask content script to blur it again just in case
+                chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                    if (tabs[0]) {
+                        chrome.tabs.sendMessage(tabs[0].id, { action: "blurPost", postId: request.postId });
+                    }
+                });
+                sendResponse({ status: 'ok' });
+            } catch (e) {
+                console.error('confirmPhishing error', e);
+                sendResponse({ status: 'error', message: String(e) });
+            }
+        })();
+        return true;
     } else if (request.action === "getFlaggedLinks") {
         // Message from popup to get all flagged links
         (async () => {
