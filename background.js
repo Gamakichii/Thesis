@@ -1,209 +1,209 @@
-// ==============================================================================
-//
-//  Facebook Phishing Detector - Background Service Worker
-//
-// ==============================================================================
-
-// --- Firebase Imports ---
+// Firebase imports
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-import { getFirestore, collection, addDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-// --- Global Variables ---
+// Global Firebase variables (provided by Canvas environment)
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-// The endpoint where your Flask backend API is running
-const API_ENDPOINT = "http://127.0.0.1:5000/predict";
-
 let app;
 let db;
 let auth;
-let userId = null;
+let userId = null; // Will store the authenticated user ID
 
-// ==============================================================================
-//  INITIALIZATION
-// ==============================================================================
-
+// Initialize Firebase and authenticate
 async function initializeFirebase() {
     try {
-        if (app) return; // Initialize only once
-        app = initializeApp(firebaseConfig);
-        db = getFirestore(app);
-        auth = getAuth(app);
+        if (!app) { // Initialize only once
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
 
-        if (initialAuthToken) {
-            await signInWithCustomToken(auth, initialAuthToken);
-        } else {
-            await signInAnonymously(auth);
-        }
-
-        onAuthStateChanged(auth, (user) => {
-            if (user) {
-                userId = user.uid;
-                console.log("Firebase Authentication successful. User ID:", userId);
+            // Authenticate user
+            if (initialAuthToken) {
+                await signInWithCustomToken(auth, initialAuthToken);
+                console.log("Firebase: Signed in with custom token.");
             } else {
-                userId = crypto.randomUUID();
-                console.warn("Firebase anonymous auth failed. Using random ID:", userId);
+                await signInAnonymously(auth);
+                console.log("Firebase: Signed in anonymously.");
             }
-        });
+
+            // Listen for auth state changes to get the user ID
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    userId = user.uid;
+                    console.log("Firebase: User ID set:", userId);
+                } else {
+                    userId = crypto.randomUUID(); // Fallback for unauthenticated or anonymous
+                    console.log("Firebase: User not authenticated, using random ID:", userId);
+                }
+            });
+        }
     } catch (error) {
-        console.error("Firebase initialization failed:", error);
+        console.error("Firebase initialization or authentication error:", error);
     }
 }
 
+// Call Firebase initialization immediately
 initializeFirebase();
 
-// ==============================================================================
-//  BACKEND API AND DATABASE FUNCTIONS
-// ==============================================================================
+// --- Firestore Operations ---
 
-/**
- * Calls the backend server to get a prediction from the hybrid AI model.
- * @param {string} url - The URL to analyze.
- * @param {string} postId - The unique ID of the post element.
- * @returns {Promise<boolean>} - A promise that resolves to true if phishing, false otherwise.
- */
-async function getHybridPrediction(url, postId) {
-    try {
-        const response = await fetch(API_ENDPOINT, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                url: url,
-                // The backend needs a post ID to look up in the graph. We simulate
-                // mapping the element's ID to a node ID in our graph.
-                post_id: parseInt(postId.split('-').pop()) % 2000 + 500
-            }),
-        });
-        if (!response.ok) {
-            console.error(`API Error: ${response.status}`);
-            return false;
-        }
-        const data = await response.json();
-        return data.is_phishing;
-    } catch (error) {
-        console.error("API call failed:", error);
-        return false; // Fail safe: default to not phishing on network errors
+// Collection path for flagged links (public data for sharing)
+function getFlaggedLinksCollectionRef() {
+    if (!db || !userId) {
+        console.error("Firestore not initialized or userId not available.");
+        return null;
     }
+    // Using public collection as per instructions for shared data
+    return collection(db, `artifacts/${appId}/public/data/flagged_phishing_links`);
 }
 
-/**
- * Saves a user's report about a link to the Firestore database.
- * @param {string} url - The URL being reported.
- * @param {string} reportType - 'false_positive' or 'false_negative'.
- * @param {string} reportingUserId - The ID of the user submitting the report.
- */
-async function saveReportedLink(url, reportType, reportingUserId) {
-    if (!db) {
-        console.error("Firestore not initialized. Cannot save report.");
-        return;
-    }
+// Add a new flagged link to Firestore
+async function addFlaggedLink(linkUrl, detectedByUserId) {
+    const collectionRef = getFlaggedLinksCollectionRef();
+    if (!collectionRef) return false;
+
     try {
-        const reportsCollectionRef = collection(db, `artifacts/${appId}/public/data/reported_links`);
-        await addDoc(reportsCollectionRef, {
-            url: url,
-            report_type: reportType,
-            reported_by: reportingUserId,
-            timestamp: new Date()
+        await addDoc(collectionRef, {
+            url: linkUrl,
+            timestamp: new Date(),
+            userId: detectedByUserId // Store which user flagged it
         });
-        console.log(`Firestore: Report for ${url} as ${reportType} saved successfully.`);
+        console.log(`Firestore: Added flagged link: ${linkUrl}`);
+        return true;
     } catch (e) {
-        console.error("Firestore: Error saving report:", e);
+        console.error("Firestore: Error adding document: ", e);
+        return false;
     }
 }
 
-/**
- * Fetches previously flagged links from the database for the popup.
- * @returns {Promise<Array>} - A promise that resolves to an array of flagged link objects.
- */
+// Get all flagged links from Firestore
 async function getAllFlaggedLinks() {
-    if (!db) return [];
+    const collectionRef = getFlaggedLinksCollectionRef();
+    if (!collectionRef) return [];
+
     try {
-        const flaggedLinksCollectionRef = collection(db, `artifacts/${appId}/public/data/flagged_phishing_links`);
-        const querySnapshot = await getDocs(flaggedLinksCollectionRef);
+        const querySnapshot = await getDocs(collectionRef);
         const links = [];
-        querySnapshot.forEach((doc) => links.push(doc.data()));
+        querySnapshot.forEach((doc) => {
+            links.push(doc.data());
+        });
+        console.log("Firestore: Fetched flagged links:", links);
         return links;
     } catch (e) {
-        console.error("Firestore: Error getting flagged links:", e);
+        console.error("Firestore: Error getting documents: ", e);
         return [];
     }
 }
 
-// ==============================================================================
-//  MAIN MESSAGE LISTENER
-// ==============================================================================
+// --- Simulated ML Model Prediction ---
 
+// This function simulates the ML model's prediction.
+async function getMLPrediction(postText, postLinks) {
+    console.log("Simulating ML prediction for:", { postText, postLinks });
+
+    // More aggressive phishing keywords for testing purposes
+    const phishingKeywords = [
+        "scam", "phish", "free money", "urgent update", "verify account", "click here",
+        "congratulations", "winner", "claim now", "limited time", "security alert",
+        "account suspended", "password reset", "invoice", "delivery failed",
+        "unusual activity", "verify your identity", "financial aid", "tax refund",
+        "cash app", "paypal", "bank account", "login required", "authentication",
+        "suspicious login", "your package is waiting", "update your information"
+    ];
+    const textContainsPhishing = phishingKeywords.some(keyword =>
+        postText.toLowerCase().includes(keyword)
+    );
+
+    // More aggressive URL patterns for testing purposes
+    const suspiciousUrlPatterns = [
+        "scam", "phish", "bit.ly", "tinyurl.com", "goo.gl", // Common shorteners
+        "login-", "-verify", "-update", "-security", "-account", // Common phishing URL components
+        ".xyz", ".top", ".club", ".online", ".buzz", ".site", // Common suspicious TLDs
+        "paypal.com.fake.site.com", // Example of sub-domain trickery
+        "http://" // Non-HTTPS links are often suspicious for sensitive actions
+    ];
+
+    const linkContainsPhishing = postLinks.some(link => {
+        const lowerCaseLink = link.toLowerCase();
+        return suspiciousUrlPatterns.some(pattern => lowerCaseLink.includes(pattern));
+    });
+
+    const isPhishing = textContainsPhishing || linkContainsPhishing;
+
+    return {
+        isPhishing: isPhishing,
+        confidence: isPhishing ? 0.95 : 0.05 // High confidence if detected, low otherwise
+    };
+}
+
+// --- Background Script Logic ---
+
+// Listener for messages from popup.js and content_script.js
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    // Ensure this listener returns true for asynchronous operations
-    let isAsync = false;
-
-    switch (request.action) {
-        case "analyzePosts":
-            isAsync = true;
-            console.log(`Received ${request.posts.length} posts with links to analyze.`);
-            request.posts.forEach(async (post) => {
-                for (const link of post.links) {
-                    const isPhishing = await getHybridPrediction(link, post.id);
-                    if (isPhishing) {
-                        console.warn(`HYBRID MODEL DETECTED PHISHING in post ${post.id}`);
-                        // Tell the content script to blur the post
-                        chrome.tabs.sendMessage(sender.tab.id, {
-                            action: "blurPost",
-                            postId: post.id,
-                            links: post.links // Pass links for reporting functionality
-                        });
-                        // Once one link is flagged, we can stop checking this post
+    if (request.action === "scanPage") {
+        // Message from popup to scan the current active tab
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            if (tabs[0]) {
+                // Send a message to the content script in the active tab to initiate scanning
+                chrome.tabs.sendMessage(tabs[0].id, { action: "scanPageFromBackground" }, (response) => {
+                    if (chrome.runtime.lastError) {
+                        console.error("Error sending message to content script:", chrome.runtime.lastError.message);
+                        sendResponse({ status: "error", message: "Could not inject content script. Make sure you are on a Facebook page." });
                         return;
                     }
-                }
-            });
-            sendResponse({ status: "Analysis requests sent to backend." });
-            break;
-
-        case "reportLink":
-            isAsync = true;
-            if (userId) {
-                saveReportedLink(request.url, request.type, userId);
-                sendResponse({ status: "Report received by background." });
+                    console.log("Scan initiated on active tab:", tabs[0].url, response);
+                    sendResponse({ status: "success", message: "Scan initiated on Facebook page." });
+                });
             } else {
-                sendResponse({ status: "Error: User not authenticated." });
+                sendResponse({ status: "error", message: "No active tab found." });
             }
-            break;
-
-        case "getUserId":
-            sendResponse({ userId: userId });
-            break;
-
-        case "getFlaggedLinks":
-            isAsync = true;
-            getAllFlaggedLinks().then(links => {
-                sendResponse({ links: links });
-            });
-            break;
-            
-        case "scanPage": // From popup
-             isAsync = true;
-             chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-                if (tabs[0] && tabs[0].id) {
-                    chrome.tabs.sendMessage(tabs[0].id, { action: "scanPageFromBackground" }, (response) => {
-                         if (chrome.runtime.lastError) {
-                            console.error("Error sending scan request:", chrome.runtime.lastError.message);
-                            sendResponse({ status: "error", message: "Could not connect to the page." });
-                         } else {
-                            sendResponse({ status: "success", message: "Page scan initiated." });
-                         }
-                    });
+        });
+        return true; // Indicate that sendResponse will be called asynchronously
+    } else if (request.action === "analyzePosts") {
+        // Message from content_script.js with extracted post data
+        console.log("Background script: Received posts for analysis:", request.posts.length);
+        request.posts.forEach(async (post) => {
+            const prediction = await getMLPrediction(post.text, post.links);
+            if (prediction.isPhishing) {
+                console.warn(`Phishing detected in post ${post.id}! Links: ${post.links.join(', ')}`);
+                // Store the flagged link in Firestore
+                if (post.links.length > 0) {
+                    for (const link of post.links) {
+                        await addFlaggedLink(link, userId); // Use the authenticated userId
+                    }
                 } else {
-                    sendResponse({ status: "error", message: "No active tab found." });
+                    // If no specific link, store the post text as a "link" for simplicity
+                    await addFlaggedLink(`Post Text: "${post.text.substring(0, 50)}..."`, userId);
                 }
-            });
-            break;
-    }
 
-    return isAsync;
+                // Send message back to content script to blur the post
+                chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                    if (tabs[0]) {
+                        chrome.tabs.sendMessage(tabs[0].id, { action: "blurPost", postId: post.id });
+                    }
+                });
+            } else {
+                // console.log(`Post ${post.id} seems legitimate.`);
+            }
+        });
+        sendResponse({ status: "processing" }); // Acknowledge receipt
+        return true;
+    } else if (request.action === "getFlaggedLinks") {
+        // Message from popup to get all flagged links
+        (async () => {
+            const links = await getAllFlaggedLinks();
+            sendResponse({ status: "success", links: links });
+        })();
+        return true; // Indicate that sendResponse will be called asynchronously
+    } else if (request.action === "getUserId") {
+        // Message from popup to get the current user ID
+        sendResponse({ userId: userId });
+        return true; // Indicate that sendResponse will be called asynchronously
+    }
 });
 
-console.log("Phishing Detector background service worker loaded and ready.");
+console.log("Background service worker loaded.");
