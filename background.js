@@ -362,3 +362,31 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 console.log("Background service worker loaded.");
+
+// Auto-scan: trigger scans on tab activation, tab updates, and SPA navigations
+function triggerScanOnActiveFacebookTab() {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tab = tabs && tabs[0];
+        if (!tab || !tab.url) return;
+        if (!/https?:\/\/(www\.)?facebook\.com\//i.test(tab.url)) return;
+        chrome.tabs.sendMessage(tab.id, { action: "scanPageFromBackground" }, () => {});
+    });
+}
+
+chrome.tabs.onActivated.addListener(() => {
+    triggerScanOnActiveFacebookTab();
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (changeInfo.status === 'complete' && tab && tab.url && /https?:\/\/(www\.)?facebook\.com\//i.test(tab.url)) {
+        chrome.tabs.sendMessage(tabId, { action: "scanPageFromBackground" }, () => {});
+    }
+});
+
+if (chrome.webNavigation && chrome.webNavigation.onHistoryStateUpdated) {
+    chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
+        if (details && details.url && /https?:\/\/(www\.)?facebook\.com\//i.test(details.url)) {
+            chrome.tabs.sendMessage(details.tabId, { action: "scanPageFromBackground" }, () => {});
+        }
+    });
+}

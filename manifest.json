@@ -3,7 +3,7 @@
     "name": "Facebook Phishing Detector",
     "version": "1.0",
     "description": "Detects and blurs potential phishing links on Facebook using a hybrid AI model.",
-    "permissions": ["activeTab", "scripting", "storage"],
+    "permissions": ["activeTab", "scripting", "storage", "webNavigation"],
     "host_permissions": [
         "https://www.facebook.com/*",
         "http://127.0.0.1:5000/*"
