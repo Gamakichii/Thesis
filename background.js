@@ -283,8 +283,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         chrome.tabs.sendMessage(tabs[0].id, { action: "blurPost", postId: post.id });
                     }
                 });
-                         } else {
-                // console.log(`Post ${post.id} seems legitimate.`);
+            } else {
+                // Unblur if previously blurred by a heuristic (now disabled) or prior run
+                chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                    if (tabs[0]) {
+                        chrome.tabs.sendMessage(tabs[0].id, { action: "unblurPost", postId: post.id });
+                    }
+                });
             }
         });
         sendResponse({ status: "processing" }); // Acknowledge receipt

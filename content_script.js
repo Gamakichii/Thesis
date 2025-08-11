@@ -39,9 +39,7 @@ function extractPostContent(postElement) {
         });
     } catch (_) {}
 
-    // Heuristic: if any link looks dangerous, mark for instant blur
-    const instant = links.some(linkLooksSuspicious);
-    return { text, links, instant };
+    return { text, links };
 }
 
 function linkLooksSuspicious(url) {
@@ -268,12 +266,7 @@ async function scanAndSendPosts() {
                 // Add non-blur control so user can mark as malicious if we miss it
                 addNonBlurMaliciousControl(postElement, postId);
 
-                // Optimistic, fast pre-blur for clearly suspicious links
-                try {
-                    if (content.instant) {
-                        blurPost(postElement, postId);
-                    }
-                } catch (_) {}
+                // Removed pre-blur; we will blur only after backend confirms
             }
         }
     });
