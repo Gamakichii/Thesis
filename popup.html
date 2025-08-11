@@ -82,6 +82,12 @@
         <button id="scanButton" class="button button-primary">Scan Current Page</button>
         <button id="viewFlaggedButton" class="button button-primary">View Flagged Links</button>
 
+        <div class="mt-2 p-2 bg-white rounded">
+            <div class="text-sm font-semibold mb-1">Report a missed phishing link (False Negative)</div>
+            <input id="fnUrl" type="url" placeholder="Paste suspicious URL" class="w-full p-2 border rounded mb-2" />
+            <button id="reportFnButton" class="button button-primary w-full">Report False Negative</button>
+        </div>
+
         <div class="user-id-display mt-4">
             User ID: <span id="userIdDisplay">Loading...</span>
         </div>

@@ -61,6 +61,32 @@ function getFlaggedLinksCollectionRef() {
     return collection(db, `artifacts/${appId}/public/data/flagged_phishing_links`);
 }
 
+// Add a collection for user reports (private by rules)
+function getUserReportsCollectionRef() {
+    if (!db || !userId) {
+        console.error("Firestore not initialized or userId not available.");
+        return null;
+    }
+    return collection(db, `artifacts/${appId}/private/user_reports`);
+}
+
+async function addUserReport(type, payload) {
+    const collectionRef = getUserReportsCollectionRef();
+    if (!collectionRef) return false;
+    try {
+        await addDoc(collectionRef, {
+            type,
+            payload,
+            userId,
+            timestamp: new Date()
+        });
+        return true;
+    } catch (e) {
+        console.error('Firestore: Error adding user report:', e);
+        return false;
+    }
+}
+
 // Add a new flagged link to Firestore
 async function addFlaggedLink(linkUrl, detectedByUserId) {
     const collectionRef = getFlaggedLinksCollectionRef();
@@ -99,45 +125,38 @@ async function getAllFlaggedLinks() {
     }
 }
 
-// --- Simulated ML Model Prediction ---
+// --- Backend ML Model Prediction ---
 
-// This function simulates the ML model's prediction.
-async function getMLPrediction(postText, postLinks) {
-    console.log("Simulating ML prediction for:", { postText, postLinks });
+async function getBackendPredictionForLink(url, postId) {
+    try {
+        const response = await fetch('http://127.0.0.1:5000/predict', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, post_id: postId })
+        });
+        if (!response.ok) {
+            const errText = await response.text();
+            console.error('Backend prediction error:', response.status, errText);
+            return { is_phishing: false };
+        }
+        const data = await response.json();
+        return data; // { is_phishing: boolean }
+    } catch (e) {
+        console.error('Network error calling backend /predict:', e);
+        return { is_phishing: false };
+    }
+}
 
-    // More aggressive phishing keywords for testing purposes
-    const phishingKeywords = [
-        "scam", "phish", "free money", "urgent update", "verify account", "click here",
-        "congratulations", "winner", "claim now", "limited time", "security alert",
-        "account suspended", "password reset", "invoice", "delivery failed",
-        "unusual activity", "verify your identity", "financial aid", "tax refund",
-        "cash app", "paypal", "bank account", "login required", "authentication",
-        "suspicious login", "your package is waiting", "update your information"
-    ];
-    const textContainsPhishing = phishingKeywords.some(keyword =>
-        postText.toLowerCase().includes(keyword)
+// Aggregates per-link predictions into a per-post decision
+async function getMLPrediction(postText, postLinks, postId) {
+    if (!postLinks || postLinks.length === 0) {
+        return { isPhishing: false, flaggedLinks: [] };
+    }
+    const results = await Promise.all(
+        postLinks.map(async (link) => ({ link, res: await getBackendPredictionForLink(link, postId) }))
     );
-
-    // More aggressive URL patterns for testing purposes
-    const suspiciousUrlPatterns = [
-        "scam", "phish", "bit.ly", "tinyurl.com", "goo.gl", // Common shorteners
-        "login-", "-verify", "-update", "-security", "-account", // Common phishing URL components
-        ".xyz", ".top", ".club", ".online", ".buzz", ".site", // Common suspicious TLDs
-        "paypal.com.fake.site.com", // Example of sub-domain trickery
-        "http://" // Non-HTTPS links are often suspicious for sensitive actions
-    ];
-
-    const linkContainsPhishing = postLinks.some(link => {
-        const lowerCaseLink = link.toLowerCase();
-        return suspiciousUrlPatterns.some(pattern => lowerCaseLink.includes(pattern));
-    });
-
-    const isPhishing = textContainsPhishing || linkContainsPhishing;
-
-    return {
-        isPhishing: isPhishing,
-        confidence: isPhishing ? 0.95 : 0.05 // High confidence if detected, low otherwise
-    };
+    const flaggedLinks = results.filter(({ res }) => !!res && res.is_phishing).map(({ link }) => link);
+    return { isPhishing: flaggedLinks.length > 0, flaggedLinks };
 }
 
 // --- Background Script Logic ---
@@ -167,17 +186,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // Message from content_script.js with extracted post data
         console.log("Background script: Received posts for analysis:", request.posts.length);
         request.posts.forEach(async (post) => {
-            const prediction = await getMLPrediction(post.text, post.links);
+            const prediction = await getMLPrediction(post.text, post.links, post.id);
             if (prediction.isPhishing) {
                 console.warn(`Phishing detected in post ${post.id}! Links: ${post.links.join(', ')}`);
                 // Store the flagged link in Firestore
-                if (post.links.length > 0) {
-                    for (const link of post.links) {
-                        await addFlaggedLink(link, userId); // Use the authenticated userId
-                    }
-                } else {
-                    // If no specific link, store the post text as a "link" for simplicity
-                    await addFlaggedLink(`Post Text: "${post.text.substring(0, 50)}..."`, userId);
+                for (const link of prediction.flaggedLinks) {
+                    await addFlaggedLink(link, userId);
                 }
 
                 // Send message back to content script to blur the post
@@ -191,6 +205,36 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             }
         });
         sendResponse({ status: "processing" }); // Acknowledge receipt
+        return true;
+    } else if (request.action === 'reportFalsePositive') {
+        // User says: This blurred post/link is safe
+        (async () => {
+            try {
+                const links = Array.isArray(request.links) ? request.links : [];
+                await addUserReport('false_positive', { postId: request.postId, links });
+                sendResponse({ status: 'reported' });
+            } catch (e) {
+                console.error('Error reporting false positive:', e);
+                sendResponse({ status: 'error', message: String(e) });
+            }
+        })();
+        return true;
+    } else if (request.action === 'reportFalseNegative') {
+        // User says: This phishing link was missed
+        (async () => {
+            try {
+                const url = request.url;
+                if (!url) {
+                    sendResponse({ status: 'error', message: 'Missing url' });
+                    return;
+                }
+                await addUserReport('false_negative', { url });
+                sendResponse({ status: 'reported' });
+            } catch (e) {
+                console.error('Error reporting false negative:', e);
+                sendResponse({ status: 'error', message: String(e) });
+            }
+        })();
         return true;
     } else if (request.action === "getFlaggedLinks") {
         // Message from popup to get all flagged links

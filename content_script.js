@@ -63,9 +63,14 @@ function blurPost(postElement, postId) {
     overlay.innerHTML = `
         <p class="text-lg font-bold mb-2">⚠️ Potential Phishing Link Detected ⚠️</p>
         <p class="text-sm mb-4">This post may contain a malicious link. Proceed with caution.</p>
-        <button class="unblur-button bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-full shadow-lg transition-all duration-200 ease-in-out">
-            View Post Anyway
-        </button>
+        <div class="flex gap-3">
+            <button class="unblur-button bg-red-500 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-full shadow-lg transition-all duration-200 ease-in-out">
+                View Post Anyway
+            </button>
+            <button class="report-safe-button bg-gray-600 hover:bg-gray-700 text-white font-semibold py-2 px-4 rounded-full shadow-lg transition-all duration-200 ease-in-out">
+                Report as Safe
+            </button>
+        </div>
     `;
 
     // Blur only the children, not the container (so the overlay isn't blurred)
@@ -91,10 +96,59 @@ function blurPost(postElement, postId) {
         });
         overlay.remove();
         postElement.dataset.phishingBlurred = 'false';
+        addReblurButton(postElement, postId);
+    });
+
+    // Add event listener to the report-as-safe (false positive) button
+    const reportSafeButton = overlay.querySelector('.report-safe-button');
+    reportSafeButton.addEventListener('click', (event) => {
+        event.stopPropagation();
+        try {
+            const encodedLinks = postElement.dataset.phishingLinks || '[]';
+            const links = JSON.parse(encodedLinks);
+            chrome.runtime.sendMessage({
+                action: 'reportFalsePositive',
+                postId,
+                links
+            });
+        } catch (_) {
+            chrome.runtime.sendMessage({ action: 'reportFalsePositive', postId, links: [] });
+        }
     });
 
     postElement.dataset.phishingBlurred = 'true';
     console.log(`Post ${postId} blurred.`);
+}
+
+function addReblurButton(postElement, postId) {
+    // Remove existing reblur button if present
+    const existingBtn = postElement.querySelector('.reblur-button');
+    if (existingBtn) existingBtn.remove();
+
+    const btn = document.createElement('button');
+    btn.className = 'reblur-button';
+    btn.textContent = 'Re-blur';
+    btn.style.cssText = `
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        z-index: 10000;
+        background: rgba(66, 103, 178, 0.95);
+        color: #fff;
+        border: none;
+        border-radius: 16px;
+        padding: 6px 10px;
+        font-size: 12px;
+        cursor: pointer;
+    `;
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        // Remove button before re-blur to avoid double overlays
+        btn.remove();
+        blurPost(postElement, postId);
+    });
+    postElement.style.position = postElement.style.position || 'relative';
+    postElement.appendChild(btn);
 }
 
 function getFacebookPostElements() {
@@ -130,10 +184,14 @@ async function scanAndSendPosts() {
         const postId = postElement.dataset.phishingPostId || `post-${Date.now()}-${index}`;
         postElement.dataset.phishingPostId = postId;
 
+        // Store links on the element for later reporting and controls
+        const content = extractPostContent(postElement);
+        postElement.dataset.phishingLinks = JSON.stringify(content.links || []);
+
         // Only process if not already processed
         if (!processedPostIds.has(postId)) {
-            const content = extractPostContent(postElement);
-            if (content.text || content.links.length > 0) {
+            // Only analyze posts that contain external links
+            if (content.links.length > 0) {
                 newPostsData.push({
                     id: postId,
                     text: content.text,
@@ -169,6 +227,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             sendResponse({ status: "not_found", postId: request.postId });
         }
         return true; // Indicate that sendResponse will be called asynchronously
+    } else if (request.action === 'reblurPost') {
+        const postElement = document.querySelector(`[data-phishing-post-id="${request.postId}"]`);
+        if (postElement) {
+            blurPost(postElement, request.postId);
+            sendResponse({ status: 'reblurred', postId: request.postId });
+        } else {
+            sendResponse({ status: 'not_found', postId: request.postId });
+        }
+        return true;
     } else if (request.action === "scanPageFromBackground") {
         // Trigger scan when requested by background script (e.g., from popup)
         scanAndSendPosts();

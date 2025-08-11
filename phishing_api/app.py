@@ -14,7 +14,8 @@ app = Flask(__name__)
 CORS(app)
 
 try:
-    autoencoder_model = tf.keras.models.load_model('phishing_autoencoder_model.h5')
+    # Load Keras autoencoder model (matches file present in repo)
+    autoencoder_model = tf.keras.models.load_model('phishing_autoencoder_model.keras')
     with open('scaler.pkl', 'rb') as f: scaler = pickle.load(f)
     with open('autoencoder_threshold.txt', 'r') as f: autoencoder_threshold = float(f.read())
     class GCN(torch.nn.Module):

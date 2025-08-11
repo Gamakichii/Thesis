@@ -2,6 +2,8 @@
 const scanButton = document.getElementById('scanButton');
 const viewFlaggedButton = document.getElementById('viewFlaggedButton');
 const statusDiv = document.getElementById('status');
+const reportFnButton = document.getElementById('reportFnButton');
+const fnUrlInput = document.getElementById('fnUrl');
 const userIdDisplay = document.getElementById('userIdDisplay');
 
 // Function to update the status message in the popup
@@ -51,3 +53,24 @@ viewFlaggedButton.addEventListener('click', () => {
         }
     });
 });
+
+// Event listener for reporting a false negative
+if (reportFnButton) {
+    reportFnButton.addEventListener('click', () => {
+        const url = (fnUrlInput && fnUrlInput.value || '').trim();
+        if (!url) {
+            updateStatus('Please paste a URL to report.', 'error');
+            return;
+        }
+        updateStatus('Reporting missed phishing link...', 'info');
+        chrome.runtime.sendMessage({ action: 'reportFalseNegative', url }, (response) => {
+            if (response && response.status === 'reported') {
+                updateStatus('Thank you. We recorded your report.', 'success');
+                fnUrlInput.value = '';
+            } else {
+                const msg = response && response.message ? response.message : 'Unknown error';
+                updateStatus(`Error reporting: ${msg}`, 'error');
+            }
+        });
+    });
+}
