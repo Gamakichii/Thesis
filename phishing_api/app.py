@@ -8,6 +8,7 @@ import re
 import tldextract
 import json
 import os
+from google.cloud import firestore
 
 # --- Initialize App and Load Models ---
 app = Flask(__name__)
@@ -36,6 +37,14 @@ except Exception as e:
     print(f"❌ Error loading models: {e}")
     autoencoder_model, scaler, autoencoder_threshold = None, None, None
     post_node_map, gnn_probs = None, None
+
+# --- Firestore client for server-side writes ---
+try:
+    fs_db = firestore.Client()
+    print("✅ Firestore client initialized (server-side).")
+except Exception as e:
+    fs_db = None
+    print(f"⚠️ Firestore client not available: {e}")
 
 def _compute_lexical_subset(url: str) -> dict:
     u = url or ""
@@ -191,6 +200,95 @@ def predict_batch():
             for url, pid, pred in zip(urls, post_ids, preds)
         ]})
 
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# --- Server-side report/graph endpoints (extension posts here) ---
+def _fs_ok():
+    return fs_db is not None
+
+@app.route('/report', methods=['POST'])
+def report():
+    if not _fs_ok():
+        return jsonify({'error': 'Firestore not configured on server'}), 500
+    body = request.get_json() or {}
+    app_id = body.get('app_id')
+    rtype = body.get('type')
+    payload = body.get('payload') or {}
+    user_id = body.get('userId') or 'anon'
+    if not app_id or not rtype:
+        return jsonify({'error': 'Missing app_id or type'}), 400
+    try:
+        col = fs_db.collection(f"artifacts/{app_id}/private_user_reports")
+        col.add({'type': rtype, 'payload': payload, 'userId': user_id, 'timestamp': firestore.SERVER_TIMESTAMP})
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/flag', methods=['POST'])
+def flag():
+    if not _fs_ok():
+        return jsonify({'error': 'Firestore not configured on server'}), 500
+    body = request.get_json() or {}
+    app_id = body.get('app_id')
+    url = body.get('url')
+    user_id = body.get('userId') or 'anon'
+    if not app_id or not url:
+        return jsonify({'error': 'Missing app_id or url'}), 400
+    try:
+        col = fs_db.collection(f"artifacts/{app_id}/public/data/flagged_phishing_links")
+        col.add({'url': url, 'userId': user_id, 'timestamp': firestore.SERVER_TIMESTAMP})
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/graph_ingest', methods=['POST'])
+def graph_ingest():
+    if not _fs_ok():
+        return jsonify({'error': 'Firestore not configured on server'}), 500
+    b = request.get_json() or {}
+    app_id = b.get('app_id')
+    user_id = b.get('userId') or 'anon'
+    post_id = b.get('postId')
+    author = b.get('author')
+    ts = b.get('ts')
+    domains = b.get('domains') or []
+    counts = b.get('counts') or {}
+    if not app_id or not post_id:
+        return jsonify({'error': 'Missing app_id or postId'}), 400
+    try:
+        nodes_col = fs_db.collection(f"artifacts/{app_id}/private/graph/nodes")
+        edges_col = fs_db.collection(f"artifacts/{app_id}/private/graph/edges")
+        # upsert nodes
+        nodes_col.document(f"user:{user_id}").set({'type': 'user', 'userId': user_id}, merge=True)
+        nodes_col.document(f"post:{post_id}").set({'type': 'post', 'postId': post_id, 'author': author, 'ts': ts, 'domains': domains, 'counts': counts}, merge=True)
+        for d in domains:
+            nodes_col.document(f"domain:{d}").set({'type': 'domain', 'domain': d}, merge=True)
+            edges_col.add({'src': f"post:{post_id}", 'dst': f"domain:{d}", 'edgeType': 'contains', 'userId': user_id, 'ts': firestore.SERVER_TIMESTAMP})
+        edges_col.add({'src': f"user:{user_id}", 'dst': f"post:{post_id}", 'edgeType': 'view', 'userId': user_id, 'ts': firestore.SERVER_TIMESTAMP})
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/graph_click', methods=['POST'])
+def graph_click():
+    if not _fs_ok():
+        return jsonify({'error': 'Firestore not configured on server'}), 500
+    b = request.get_json() or {}
+    app_id = b.get('app_id')
+    user_id = b.get('userId') or 'anon'
+    domain = b.get('domain')
+    post_id = b.get('postId')
+    if not app_id or not domain:
+        return jsonify({'error': 'Missing app_id or domain'}), 400
+    try:
+        nodes_col = fs_db.collection(f"artifacts/{app_id}/private/graph/nodes")
+        edges_col = fs_db.collection(f"artifacts/{app_id}/private/graph/edges")
+        nodes_col.document(f"user:{user_id}").set({'type': 'user', 'userId': user_id}, merge=True)
+        nodes_col.document(f"domain:{domain}").set({'type': 'domain', 'domain': domain}, merge=True)
+        edges_col.add({'src': f"user:{user_id}", 'dst': f"domain:{domain}", 'edgeType': 'click', 'postId': post_id, 'userId': user_id, 'ts': firestore.SERVER_TIMESTAMP})
+        return jsonify({'status': 'ok'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

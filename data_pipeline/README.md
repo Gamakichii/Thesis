@@ -1,6 +1,6 @@
-# Data Export Pipeline
+# Training data source
 
-This pipeline exports labeled feedback (false positives/negatives and optional flagged links) from Firestore to a CSV for model retraining.
+Your training now reads directly from Firestore in Colab and CI; exporting CSVs is optional. Keep this script only if you want periodic snapshots or offline inspection.
 
 ## Setup
 1. Install dependencies:
@@ -12,21 +12,34 @@ pip install -r requirements.txt
 - Save the JSON locally and set the environment variable:
   - Windows PowerShell:
     ```powershell
-    $env:GOOGLE_APPLICATION_CREDENTIALS = "C:\\path\\to\\service_account.json"
+    $env:GOOGLE_APPLICATION_CREDENTIALS = "D:\\Vanderlei\\Thesis\\firebase-sa.json"
     ```
   - CMD:
     ```bat
     set GOOGLE_APPLICATION_CREDENTIALS=C:\path\to\service_account.json
     ```
 
-## Usage
-Run the exporter from the `data_pipeline` directory:
+## Direct Firestore usage (recommended)
+In Colab:
 ```
-python export_feedback.py --app-id your-app-id --include-flagged --output ..\\feedback_dataset.csv
+from google.colab import files
+uploaded = files.upload()  # service-account.json
+import os
+sa = next(iter(uploaded.keys()))
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = f"/content/{sa}"
+
+from google.cloud import firestore
+db = firestore.Client()
+
+APP_ID = "ads-phishing-link"
+REPORTS = f"artifacts/{APP_ID}/private_user_reports"
+FLAGGED = f"artifacts/{APP_ID}/public/data/flagged_phishing_links"
+
+report_docs = list(db.collection(REPORTS).stream())
+flagged_docs = list(db.collection(FLAGGED).stream())
 ```
-- `--app-id` must match the `appId` you use in the extension (e.g., your Firebase project ID or a chosen namespace).
-- `--include-flagged` adds public flagged links as weak positives (optional).
-- `--output` path for the CSV (defaults to `feedback_dataset.csv`).
+
+Use these docs directly in your feature pipeline instead of a CSV.
 
 ## Output
 The CSV contains:
@@ -39,17 +52,11 @@ Create a daily task (adjust paths):
 schtasks /Create /SC DAILY /ST 02:00 /TN "ExportFeedback" /TR "\"C:\\Path\\To\\Python.exe\" D:\\Vanderlei\\Thesis\\Thesis\\data_pipeline\\export_feedback.py --app-id your-app-id --include-flagged --output D:\\Vanderlei\\Thesis\\Thesis\\feedback_dataset.csv"
 ```
 
-## GitHub Actions
-A workflow is included at `.github/workflows/export_feedback.yml` that runs daily and can be triggered manually.
-
-- Add repository secrets:
-  - `GCP_SA_KEY`: Paste the entire JSON content of your service account key.
-  - `APP_ID`: Your app ID used in Firestore paths (same as in the extension).
-- Trigger manually with inputs (optional): `app_id`, `include_flagged`.
-- The CSV will be available as an artifact named `feedback-dataset`.
+## GitHub Actions (optional)
+If you keep scheduled snapshots, the workflow at `.github/workflows/export_feedback.yml` will export a CSV artifact from Firestore.
 
 ## Notes
 - Ensure Firestore has documents under:
-  - `artifacts/{app-id}/private/user_reports`
+  - `artifacts/{app-id}/private_user_reports`
   - `artifacts/{app-id}/public/data/flagged_phishing_links`
-- Firestore rules should allow authenticated writes to both, and public read only for the flagged links path.
+- Rules: allow authenticated writes; deny reads for private; allow public reads for flagged if desired.

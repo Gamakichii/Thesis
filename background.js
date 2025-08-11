@@ -28,29 +28,29 @@ let userId = null; // Will store the authenticated user ID
 async function initializeFirebase() {
     try {
         if (!app) { // Initialize only once
-            app = initializeApp(firebaseConfig);
-            db = getFirestore(app);
-            auth = getAuth(app);
+        app = initializeApp(firebaseConfig);
+        db = getFirestore(app);
+        auth = getAuth(app);
 
             // Authenticate user
-            if (initialAuthToken) {
-                await signInWithCustomToken(auth, initialAuthToken);
+        if (initialAuthToken) {
+            await signInWithCustomToken(auth, initialAuthToken);
                 console.log("Firebase: Signed in with custom token.");
-            } else {
-                await signInAnonymously(auth);
+        } else {
+            await signInAnonymously(auth);
                 console.log("Firebase: Signed in anonymously.");
-            }
+        }
 
             // Listen for auth state changes to get the user ID
-            onAuthStateChanged(auth, (user) => {
-                if (user) {
-                    userId = user.uid;
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                userId = user.uid;
                     console.log("Firebase: User ID set:", userId);
-                } else {
+            } else {
                     userId = crypto.randomUUID(); // Fallback for unauthenticated or anonymous
                     console.log("Firebase: User not authenticated, using random ID:", userId);
-                }
-            });
+            }
+        });
         }
     } catch (error) {
         console.error("Firebase initialization or authentication error:", error);
@@ -91,8 +91,8 @@ async function upsertGraphNode(nodeId, data) {
         return true;
     } catch (e) {
         console.error('Firestore: upsert node failed', e);
-        return false;
-    }
+            return false;
+        }
 }
 
 async function addGraphEdge(edge) {
@@ -278,12 +278,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 }
 
                 // Send message back to content script to blur the post
-                chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+             chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
                     if (tabs[0]) {
                         chrome.tabs.sendMessage(tabs[0].id, { action: "blurPost", postId: post.id });
                     }
                 });
-            } else {
+                         } else {
                 // console.log(`Post ${post.id} seems legitimate.`);
             }
         });
@@ -427,10 +427,13 @@ function triggerScanOnActiveFacebookTab() {
         if (!tab || !tab.url) return;
         if (!isFacebookUrl(tab.url)) return;
         ensureContentScriptAndScan(tab.id);
-        // Also trigger a second scan shortly after to catch lazy-loaded posts
+        // Also trigger a couple follow-up scans to catch lazy-loaded posts
         setTimeout(() => {
             ensureContentScriptAndScan(tab.id);
-        }, 1200);
+        }, 600);
+        setTimeout(() => {
+            ensureContentScriptAndScan(tab.id);
+        }, 1600);
     });
 }
 
@@ -441,9 +444,8 @@ chrome.tabs.onActivated.addListener(() => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     if (changeInfo.status === 'complete' && tab && tab.url && isFacebookUrl(tab.url)) {
         ensureContentScriptAndScan(tabId);
-        setTimeout(() => {
-            ensureContentScriptAndScan(tabId);
-        }, 1200);
+        setTimeout(() => { ensureContentScriptAndScan(tabId); }, 600);
+        setTimeout(() => { ensureContentScriptAndScan(tabId); }, 1600);
     }
 });
 
@@ -451,9 +453,8 @@ if (chrome.webNavigation && chrome.webNavigation.onHistoryStateUpdated) {
     chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
         if (details && details.url && isFacebookUrl(details.url)) {
             ensureContentScriptAndScan(details.tabId);
-            setTimeout(() => {
-                ensureContentScriptAndScan(details.tabId);
-            }, 1200);
+            setTimeout(() => { ensureContentScriptAndScan(details.tabId); }, 600);
+            setTimeout(() => { ensureContentScriptAndScan(details.tabId); }, 1600);
         }
     });
 }

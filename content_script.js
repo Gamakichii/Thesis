@@ -299,8 +299,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 });
 
-// Initial scan when the content script loads (page is idle)
+// Initial scan when the content script loads
 scanAndSendPosts();
+
+// Also scan when DOM is ready and when the page becomes visible again
+document.addEventListener('DOMContentLoaded', () => {
+  requestScanDebounced(200);
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') requestScanDebounced(200);
+});
 
 let scanDebounceHandle = null;
 function requestScanDebounced(delay = 400) {
