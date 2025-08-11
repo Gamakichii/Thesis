@@ -117,7 +117,7 @@ function getUserReportsCollectionRef() {
         console.error("Firestore not initialized.");
         return null;
     }
-    return collection(db, `artifacts/${appId}/private/user_reports`);
+    return collection(db, `artifacts/${appId}/private_user_reports`);
 }
 
 async function addUserReport(type, payload) {

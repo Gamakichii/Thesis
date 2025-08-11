@@ -99,8 +99,8 @@ def to_rows_from_flagged(doc: Dict[str, Any]) -> Dict[str, Any]:
 def export_feedback(app_id: str, include_flagged: bool) -> pd.DataFrame:
     db = firestore.Client()
 
-    # Private user reports
-    reports_path = f"artifacts/{app_id}/private/user_reports"
+    # Private user reports (collection path must have odd number of segments)
+    reports_path = f"artifacts/{app_id}/private_user_reports"
     report_docs = db.collection(reports_path).stream()
     report_rows: List[Dict[str, Any]] = []
     for d in report_docs:
