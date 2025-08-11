@@ -4,9 +4,18 @@ import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged }
 import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
 // Global Firebase variables (provided by Canvas environment)
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+  // background.js
+  const appId = 'yads-phishing-link'; // e.g., 'prod' or your Firebase project ID
+  const firebaseConfig = {
+    apiKey: "AIzaSyB9FgbYrbiKZ7Z8LaPZprDtndSjgY7YDq8",
+    authDomain: "ads-phishing-link.firebaseapp.com",
+    projectId: "ads-phishing-link",
+    storageBucket: "ads-phishing-link.firebasestorage.app",
+    messagingSenderId: "406180111870",
+    appId: "1:406180111870:web:5cc2190210073a0e2d8caf",
+    measurementId: "G-79ECP9L5YV"
+  };
+  const initialAuthToken = null; // keep null; we use anonymous auth
 
 let app;
 let db;
