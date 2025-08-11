@@ -390,6 +390,10 @@ function triggerScanOnActiveFacebookTab() {
         if (!tab || !tab.url) return;
         if (!/https?:\/\/([a-z0-9-]+\.)*facebook\.com\//i.test(tab.url)) return;
         chrome.tabs.sendMessage(tab.id, { action: "scanPageFromBackground" }, () => {});
+        // Also trigger a second scan shortly after to catch lazy-loaded posts
+        setTimeout(() => {
+            chrome.tabs.sendMessage(tab.id, { action: "scanPageFromBackground" }, () => {});
+        }, 1200);
     });
 }
 
@@ -400,6 +404,9 @@ chrome.tabs.onActivated.addListener(() => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     if (changeInfo.status === 'complete' && tab && tab.url && /https?:\/\/([a-z0-9-]+\.)*facebook\.com\//i.test(tab.url)) {
         chrome.tabs.sendMessage(tabId, { action: "scanPageFromBackground" }, () => {});
+        setTimeout(() => {
+            chrome.tabs.sendMessage(tabId, { action: "scanPageFromBackground" }, () => {});
+        }, 1200);
     }
 });
 
@@ -407,6 +414,9 @@ if (chrome.webNavigation && chrome.webNavigation.onHistoryStateUpdated) {
     chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
         if (details && details.url && /https?:\/\/([a-z0-9-]+\.)*facebook\.com\//i.test(details.url)) {
             chrome.tabs.sendMessage(details.tabId, { action: "scanPageFromBackground" }, () => {});
+            setTimeout(() => {
+                chrome.tabs.sendMessage(details.tabId, { action: "scanPageFromBackground" }, () => {});
+            }, 1200);
         }
     });
 }

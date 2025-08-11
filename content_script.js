@@ -29,6 +29,23 @@ function extractPostContent(postElement) {
     return { text, links };
 }
 
+function linkLooksSuspicious(url) {
+    try {
+        const u = new URL(url);
+        const host = (u.hostname || '').toLowerCase();
+        const href = url.toLowerCase();
+        const suspiciousTlds = ['.xyz','.top','.club','.online','.buzz','.site'];
+        const shorteners = ['bit.ly','tinyurl.com','goo.gl','t.co','ow.ly','is.gd','cutt.ly','lnkd.in','buff.ly'];
+        if (href.startsWith('http://')) return true;
+        if (shorteners.some(s => host === s)) return true;
+        if (suspiciousTlds.some(t => host.endsWith(t))) return true;
+        if (host.includes('login-') || host.includes('-verify') || host.includes('-update') || host.includes('-security') || host.includes('-account')) return true;
+        return false;
+    } catch (_) {
+        return false;
+    }
+}
+
 // Function to blur a specific post element
 function blurPost(postElement, postId) {
     if (postElement.dataset.phishingBlurred === 'true') {
@@ -229,6 +246,13 @@ async function scanAndSendPosts() {
 
                 // Add non-blur control so user can mark as malicious if we miss it
                 addNonBlurMaliciousControl(postElement, postId);
+
+                // Optimistic, fast pre-blur for clearly suspicious links
+                try {
+                    if (content.links.some(linkLooksSuspicious)) {
+                        blurPost(postElement, postId);
+                    }
+                } catch (_) {}
             }
         }
     });
