@@ -9,6 +9,7 @@ import tldextract
 import json
 import os
 from google.cloud import firestore
+from google.oauth2 import service_account
 
 # --- Initialize App and Load Models ---
 app = Flask(__name__)
@@ -39,12 +40,32 @@ except Exception as e:
     post_node_map, gnn_probs = None, None
 
 # --- Firestore client for server-side writes ---
+fs_db = None
 try:
+    # 1) Try ADC (env var GOOGLE_APPLICATION_CREDENTIALS or platform default)
     fs_db = firestore.Client()
-    print("✅ Firestore client initialized (server-side).")
+    print("✅ Firestore client initialized (ADC).")
 except Exception as e:
-    fs_db = None
-    print(f"⚠️ Firestore client not available: {e}")
+    print(f"⚠️ ADC not available: {e}")
+    # 2) Fallback to local service account file in this folder (no hard-coded path)
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            os.path.join(here, 'firebase-sa.json'),
+            os.path.join(here, 'service-account.json'),
+            os.path.join(here, 'gcp-sa.json'),
+        ]
+        for sa_path in candidates:
+            if os.path.exists(sa_path):
+                creds = service_account.Credentials.from_service_account_file(sa_path)
+                fs_db = firestore.Client(credentials=creds, project=creds.project_id)
+                print(f"✅ Firestore client initialized from local file: {os.path.basename(sa_path)}")
+                break
+        if fs_db is None:
+            print("⚠️ No local service account file found in phishing_api/. Firestore writes disabled.")
+    except Exception as ee:
+        fs_db = None
+        print(f"⚠️ Firestore local SA init failed: {ee}")
 
 def _compute_lexical_subset(url: str) -> dict:
     u = url or ""
