@@ -137,6 +137,24 @@ async function addUserReport(type, payload) {
     }
 }
 
+// Ensure graph nodes/edges exist for a reported post to avoid training-time mismatches
+async function ensureGraphNodeForReport(postId, links = []) {
+    try {
+        const domains = Array.from(new Set((Array.isArray(links) ? links : []).map((h) => {
+            try { return new URL(h).hostname; } catch { return null; }
+        }).filter(Boolean)));
+        await upsertGraphNode(userNodeId(userId || 'anon'), { type: 'user', userId: userId || 'anon' });
+        await upsertGraphNode(postNodeId(postId), { type: 'post', postId });
+        for (const d of domains) {
+            await upsertGraphNode(domainNodeId(d), { type: 'domain', domain: d });
+            await addGraphEdge({ src: postNodeId(postId), dst: domainNodeId(d), edgeType: 'contains' });
+        }
+        await addGraphEdge({ src: userNodeId(userId || 'anon'), dst: postNodeId(postId), edgeType: 'view' });
+    } catch (e) {
+        console.warn('ensureGraphNodeForReport failed:', e);
+    }
+}
+
 // Add a new flagged link to Firestore
 async function addFlaggedLink(linkUrl, detectedByUserId) {
     const collectionRef = getFlaggedLinksCollectionRef();
@@ -299,6 +317,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         (async () => {
             try {
                 const links = Array.isArray(request.links) ? request.links : [];
+                if (request.postId) {
+                    await ensureGraphNodeForReport(request.postId, links);
+                }
                 await addUserReport('false_positive', { postId: request.postId, links });
                 sendResponse({ status: 'reported' });
             } catch (e) {
@@ -316,6 +337,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     sendResponse({ status: 'error', message: 'Missing url' });
                     return;
                 }
+                if (request.postId) {
+                    await ensureGraphNodeForReport(request.postId, [url]);
+                }
                 await addUserReport('false_negative', { url });
                 sendResponse({ status: 'reported' });
             } catch (e) {
@@ -331,8 +355,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 const links = Array.isArray(request.links) ? request.links : [];
                 // Report each link as false negative; if none, still log postId
                 if (links.length === 0) {
+                    await ensureGraphNodeForReport(request.postId, []);
                     await addUserReport('false_negative', { postId: request.postId, source: 'manual' });
                 } else {
+                    await ensureGraphNodeForReport(request.postId, links);
                     for (const url of links) {
                         await addUserReport('false_negative', { url, postId: request.postId, source: 'manual' });
                     }
