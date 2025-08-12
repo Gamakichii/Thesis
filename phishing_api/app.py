@@ -152,8 +152,9 @@ def predict():
         final_score = (content_score * 0.6) + (structural_score * 0.4)
         is_phishing = final_score > 0.5
         
-        print(f"URL: {url} | Final Score: {final_score:.2f} -> Phishing: {is_phishing}")
-        return jsonify({'is_phishing': is_phishing})
+        used_gcn = bool(post_node_map is not None and gnn_probs is not None)
+        print(f"URL: {url} | content={content_score:.2f} gcn={structural_score:.2f} final={final_score:.2f} | phishing={is_phishing} gcn_used={used_gcn}")
+        return jsonify({'is_phishing': is_phishing, 'used_gcn': used_gcn, 'final_score': final_score})
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -195,8 +196,9 @@ def predict_batch():
         final_scores = (0.6 * content_scores) + (0.4 * structural_scores)
         preds = (final_scores > 0.5).tolist()
 
+        used_gcn = bool(post_node_map is not None and gnn_probs is not None)
         return jsonify({'predictions': [
-            { 'url': url, 'post_id': pid, 'is_phishing': pred }
+            { 'url': url, 'post_id': pid, 'is_phishing': pred, 'used_gcn': used_gcn }
             for url, pid, pred in zip(urls, post_ids, preds)
         ]})
 
