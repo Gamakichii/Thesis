@@ -9,7 +9,8 @@
         "https://www.facebook.com/*",
         "https://m.facebook.com/*",
         "https://web.facebook.com/*",
-        "http://127.0.0.1:5000/*"
+        "http://127.0.0.1:5000/*",
+        "https://8711b47f1219.ngrok-free.app/*"
     ],
     "background": {
         "service_worker": "background.js",
