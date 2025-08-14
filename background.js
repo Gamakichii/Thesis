@@ -17,7 +17,8 @@ import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnap
   };
   const initialAuthToken = null; // keep null; we use anonymous auth
   // Backend API base URL (can be overridden by page-injected global __api_base)
-  const API_BASE_URL = typeof __api_base !== 'undefined' ? __api_base : 'http://127.0.0.1:5000';
+  const API_BASE_URL = "https://dakugumen-api.mangosea-8f507dd6.southeastasia.azurecontainerapps.io"; // your container URL
+
 
 let app;
 let db;
