@@ -26,12 +26,40 @@ CORS(app, origins=["*"])  # Allow all origins for Chrome extension
 # Get port from environment variable (Azure provides this)
 PORT = int(os.environ.get('PORT', 8000))
 
+MODEL_LOAD_ERROR = None
 try:
-    # Load Keras autoencoder model (matches file present in repo)
-    autoencoder_model = tf.keras.models.load_model('phishing_autoencoder_model.keras')
-    with open('scaler.pkl', 'rb') as f: scaler = pickle.load(f)
-    with open('autoencoder_threshold.txt', 'r') as f: autoencoder_threshold = float(f.read())
-    
+    # Prefer native Keras 3 loader for .keras format; fallback to tf.keras
+    autoencoder_model = None
+    try:
+        import keras  # Keras 3
+        os.environ.setdefault("KERAS_BACKEND", "tensorflow")
+        autoencoder_model = keras.models.load_model('phishing_autoencoder_model.keras')
+        print("✅ Loaded autoencoder model with Keras 3.")
+    except Exception as e_k3:
+        print(f"⚠️ Keras 3 load failed, trying tf.keras: {e_k3}")
+        autoencoder_model = tf.keras.models.load_model('phishing_autoencoder_model.keras')
+        print("✅ Loaded autoencoder model with tf.keras.")
+
+    # Load scaler (try primary name, then fallback)
+    scaler = None
+    scaler_paths = ['scaler.pkl', 'scaler_final.pkl']
+    last_scaler_err = None
+    for sp in scaler_paths:
+        try:
+            with open(sp, 'rb') as f:
+                scaler = pickle.load(f)
+                print(f"✅ Loaded scaler from {sp}.")
+                break
+        except Exception as se:
+            last_scaler_err = se
+            continue
+    if scaler is None:
+        raise RuntimeError(f"Failed to load scaler from {scaler_paths}: {last_scaler_err}")
+
+    # Load threshold
+    with open('autoencoder_threshold.txt', 'r') as f:
+        autoencoder_threshold = float(f.read())
+
     # Try to load precomputed real-graph artifacts first
     gnn_probs = None
     post_node_map = None
@@ -46,6 +74,7 @@ try:
 
     print("✅ All models loaded successfully.")
 except Exception as e:
+    MODEL_LOAD_ERROR = str(e)
     print(f"❌ Error loading models: {e}")
     autoencoder_model, scaler, autoencoder_threshold = None, None, None
     post_node_map, gnn_probs = None, None
@@ -163,6 +192,14 @@ def extract_features_for_urls(urls):
 @app.route('/')
 def health_check():
     return jsonify({'status': 'healthy', 'service': 'dakugumen-phishing-detector'})
+
+# Readiness endpoint with diagnostic info
+@app.route('/ready')
+def ready_check():
+    return jsonify({
+        'models_ready': bool(autoencoder_model is not None and scaler is not None and autoencoder_threshold is not None),
+        'error': MODEL_LOAD_ERROR,
+    }), (200 if autoencoder_model is not None and scaler is not None and autoencoder_threshold is not None else 503)
 
 # --- API Endpoints ---
 @app.route('/predict', methods=['POST'])
