@@ -185,9 +185,10 @@ function addPostUnblurControls(postElement, postId) {
         try {
             const encodedLinks = postElement.dataset.phishingLinks || '[]';
             const links = JSON.parse(encodedLinks);
-            chrome.runtime.sendMessage({ action: 'confirmPhishing', postId, links });
+            // Since this control appears after a blurred post is unblurred, this is a true positive confirmation
+            chrome.runtime.sendMessage({ action: 'reportTruePositive', postId, links });
         } catch (_) {
-            chrome.runtime.sendMessage({ action: 'confirmPhishing', postId, links: [] });
+            chrome.runtime.sendMessage({ action: 'reportTruePositive', postId, links: [] });
         }
         wrapper.remove();
         // Re-blur the post automatically
@@ -378,27 +379,53 @@ function addNonBlurMaliciousControl(postElement, postId) {
     const existing = postElement.querySelector('.post-nonblur-malicious');
     if (existing) return;
 
-    const btn = document.createElement('button');
+    const btn = document.createElement('div');
     btn.className = 'post-nonblur-malicious';
-    btn.textContent = 'Mark as Malicious';
     btn.style.cssText = `
-        position: absolute; top: 8px; right: 8px; z-index: 10000;
+        position: absolute; top: 8px; right: 8px; z-index: 10000; display: flex; gap: 8px;
+    `;
+
+    const mal = document.createElement('button');
+    mal.textContent = 'Mark as Malicious';
+    mal.style.cssText = `
         background: #dc2626; color: #fff; border: none; border-radius: 16px;
         padding: 6px 10px; font-size: 12px; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.2);
     `;
-    btn.addEventListener('click', (e) => {
+    mal.addEventListener('click', (e) => {
         e.stopPropagation();
         try {
             const encodedLinks = postElement.dataset.phishingLinks || '[]';
             const links = JSON.parse(encodedLinks);
-            chrome.runtime.sendMessage({ action: 'confirmPhishing', postId, links });
+            // Not blurred but user says it's malicious: false negative
+            chrome.runtime.sendMessage({ action: 'reportFalseNegative', postId, links: (links && links[0]) ? links[0] : null, url: (links && links[0]) ? links[0] : null });
         } catch (_) {
-            chrome.runtime.sendMessage({ action: 'confirmPhishing', postId, links: [] });
+            chrome.runtime.sendMessage({ action: 'reportFalseNegative', postId, url: null });
         }
         // Blur the post since user marked it malicious
         btn.remove();
         blurPost(postElement, postId);
     });
+
+    const safe = document.createElement('button');
+    safe.textContent = 'Mark as Safe';
+    safe.style.cssText = `
+        background: #16a34a; color: #fff; border: none; border-radius: 16px;
+        padding: 6px 10px; font-size: 12px; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    `;
+    safe.addEventListener('click', (e) => {
+        e.stopPropagation();
+        try {
+            const encodedLinks = postElement.dataset.phishingLinks || '[]';
+            const links = JSON.parse(encodedLinks);
+            chrome.runtime.sendMessage({ action: 'reportTrueNegative', postId, links });
+        } catch (_) {
+            chrome.runtime.sendMessage({ action: 'reportTrueNegative', postId, links: [] });
+        }
+        btn.remove();
+    });
+
+    btn.appendChild(safe);
+    btn.appendChild(mal);
     postElement.style.position = postElement.style.position || 'relative';
     postElement.appendChild(btn);
 }

@@ -81,6 +81,28 @@ def to_rows_from_reports(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "userId": uid,
                 "timestamp": ts,
             })
+    elif t == "true_positive":
+        links = payload.get("links", []) or []
+        for url in links:
+            rows.append({
+                "url": url,
+                "normalized_url": normalize_url(url),
+                "label": 1,
+                "source": "tp",
+                "userId": uid,
+                "timestamp": ts,
+            })
+    elif t == "true_negative":
+        links = payload.get("links", []) or []
+        for url in links:
+            rows.append({
+                "url": url,
+                "normalized_url": normalize_url(url),
+                "label": 0,
+                "source": "tn",
+                "userId": uid,
+                "timestamp": ts,
+            })
     return rows
 
 

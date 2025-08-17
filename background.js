@@ -212,6 +212,18 @@ function setCachedPrediction(urlLower, value) {
     predictionCache.set(urlLower, { ...value, ts: Date.now() });
 }
 
+// Server-side report helper to centralize labels for training
+async function serverReport(rtype, payload) {
+    try {
+        const body = { app_id: appId, type: rtype, payload: payload || {}, userId: userId || 'anon' };
+        await fetch(`${API_BASE_URL}/report`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        });
+    } catch (e) {
+        console.warn('serverReport failed', e);
+    }
+}
+
 async function getBackendPredictionForLink(url, postId) {
     try {
         const urlLower = String(url || '').toLowerCase();
@@ -321,7 +333,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 if (request.postId) {
                     await ensureGraphNodeForReport(request.postId, links);
                 }
-                await addUserReport('false_positive', { postId: request.postId, links });
+                const payload = { postId: request.postId, links };
+                await addUserReport('false_positive', payload);
+                await serverReport('false_positive', payload);
                 sendResponse({ status: 'reported' });
             } catch (e) {
                 console.error('Error reporting false positive:', e);
@@ -341,7 +355,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 if (request.postId) {
                     await ensureGraphNodeForReport(request.postId, [url]);
                 }
-                await addUserReport('false_negative', { url });
+                const payload = { url, postId: request.postId || null };
+                await addUserReport('false_negative', payload);
+                await serverReport('false_negative', payload);
+                // Also store under flagged links (public), since user asserts it is malicious
+                await addFlaggedLink(url, userId);
                 sendResponse({ status: 'reported' });
             } catch (e) {
                 console.error('Error reporting false negative:', e);
@@ -349,22 +367,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             }
         })();
         return true;
-    } else if (request.action === 'confirmPhishing') {
-        // User manually marks a post as malicious (FN capture)
+    } else if (request.action === 'reportTruePositive') {
+        // User confirms a blurred post is malicious (TP capture)
         (async () => {
             try {
                 const links = Array.isArray(request.links) ? request.links : [];
-                // Report each link as false negative; if none, still log postId
-                if (links.length === 0) {
-                    await ensureGraphNodeForReport(request.postId, []);
-                    await addUserReport('false_negative', { postId: request.postId, source: 'manual' });
-                } else {
-                    await ensureGraphNodeForReport(request.postId, links);
-                    for (const url of links) {
-                        await addUserReport('false_negative', { url, postId: request.postId, source: 'manual' });
-                    }
-                }
-                // Optionally also store under flagged links (public)
+                await ensureGraphNodeForReport(request.postId, links);
+                const payload = { postId: request.postId, links, source: 'manual' };
+                await addUserReport('true_positive', payload);
+                await serverReport('true_positive', payload);
+                // Also store under flagged links (public)
                 for (const link of links) {
                     await addFlaggedLink(link, userId);
                 }
@@ -376,7 +388,23 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 });
                 sendResponse({ status: 'ok' });
             } catch (e) {
-                console.error('confirmPhishing error', e);
+                console.error('reportTruePositive error', e);
+                sendResponse({ status: 'error', message: String(e) });
+            }
+        })();
+        return true;
+    } else if (request.action === 'reportTrueNegative') {
+        // User confirms an unblurred post is safe (TN capture)
+        (async () => {
+            try {
+                const links = Array.isArray(request.links) ? request.links : [];
+                await ensureGraphNodeForReport(request.postId, links);
+                const payload = { postId: request.postId, links, source: 'manual' };
+                await addUserReport('true_negative', payload);
+                await serverReport('true_negative', payload);
+                sendResponse({ status: 'ok' });
+            } catch (e) {
+                console.error('reportTrueNegative error', e);
                 sendResponse({ status: 'error', message: String(e) });
             }
         })();
