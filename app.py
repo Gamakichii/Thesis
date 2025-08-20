@@ -5,6 +5,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import tensorflow as tf
 import re
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 import tldextract
 import json
 import os
@@ -103,7 +104,19 @@ except Exception as ee:
     print(f"⚠️ Firestore init failed: {ee}")
 
 def _compute_lexical_subset(url: str) -> dict:
-    u = url or ""
+    # Normalize URL: remove common tracking query params that can inflate lexical features
+    try:
+        raw = url or ""
+        p = urlparse(raw)
+        if p.query:
+            # Remove fbclid and utm_* params
+            q = parse_qsl(p.query, keep_blank_values=True)
+            q_filtered = [(k, v) for k, v in q if not (k.lower() == 'fbclid' or k.lower().startswith('utm_'))]
+            new_query = urlencode(q_filtered)
+            p = p._replace(query=new_query)
+        u = urlunparse(p)
+    except Exception:
+        u = url or ""
     parts = tldextract.extract(u)
     domain = ".".join([p for p in [parts.subdomain, parts.domain, parts.suffix] if p])
     path_q = u.split(domain, 1)[-1] if domain and domain in u else ""
