@@ -27,55 +27,84 @@ MODEL_LOAD_ERROR = None
 autoencoder_model = None
 scaler = None
 autoencoder_threshold = None
+effective_autoencoder_threshold = None
 gnn_probs = None
 post_node_map = None
+models_last_loaded_at = None
 
-try:
-    # Load Autoencoder model (.keras)
-    model_path = os.path.join(HERE, "phishing_autoencoder_model.keras")
+
+def load_models():
+    """Load model artifacts from disk and set global variables.
+    This can be called at startup or via the /reload_models endpoint.
+    """
+    global MODEL_LOAD_ERROR, autoencoder_model, scaler, autoencoder_threshold, effective_autoencoder_threshold, gnn_probs, post_node_map, models_last_loaded_at
+    MODEL_LOAD_ERROR = None
+    autoencoder_model = None
+    scaler = None
+    autoencoder_threshold = None
+    effective_autoencoder_threshold = None
+    gnn_probs = None
+    post_node_map = None
     try:
-        import keras  # Keras 3
-        os.environ.setdefault("KERAS_BACKEND", "tensorflow")
-        autoencoder_model = keras.models.load_model(model_path)
-        print("✅ Loaded autoencoder model with Keras 3.")
-    except Exception as e_k3:
-        print(f"⚠️ Keras 3 load failed, trying tf.keras: {e_k3}")
-        autoencoder_model = tf.keras.models.load_model(model_path)
-        print("✅ Loaded autoencoder model with tf.keras.")
+        # Load Autoencoder model (.keras)
+        model_path = os.path.join(HERE, "phishing_autoencoder_model.keras")
+        try:
+            import keras  # Keras 3
+            os.environ.setdefault("KERAS_BACKEND", "tensorflow")
+            autoencoder_model = keras.models.load_model(model_path)
+            print("✅ Loaded autoencoder model with Keras 3.")
+        except Exception as e_k3:
+            print(f"⚠️ Keras 3 load failed, trying tf.keras: {e_k3}")
+            autoencoder_model = tf.keras.models.load_model(model_path)
+            print("✅ Loaded autoencoder model with tf.keras.")
 
-    # Load Scaler (try scaler.pkl then scaler_final.pkl)
-    for sp in [os.path.join(HERE, "scaler.pkl"), os.path.join(HERE, "scaler_final.pkl")]:
-        if os.path.exists(sp):
-            with open(sp, "rb") as f:
-                scaler = pickle.load(f)
-                print(f"✅ Loaded scaler from {sp}.")
-                break
-    if scaler is None:
-        raise RuntimeError("Scaler file not found.")
+        # Load Scaler (try scaler.pkl then scaler_final.pkl)
+        for sp in [os.path.join(HERE, "scaler.pkl"), os.path.join(HERE, "scaler_final.pkl")]:
+            if os.path.exists(sp):
+                with open(sp, "rb") as f:
+                    scaler = pickle.load(f)
+                    print(f"✅ Loaded scaler from {sp}.")
+                    break
+        if scaler is None:
+            raise RuntimeError("Scaler file not found.")
 
-    # Load Threshold
-    threshold_path = os.path.join(HERE, "autoencoder_threshold.txt")
-    if os.path.exists(threshold_path):
-        with open(threshold_path, "r") as f:
-            autoencoder_threshold = float(f.read())
-        print("✅ Loaded autoencoder threshold.")
-    else:
-        raise RuntimeError("autoencoder_threshold.txt missing.")
+        # Load Threshold
+        threshold_path = os.path.join(HERE, "autoencoder_threshold.txt")
+        if os.path.exists(threshold_path):
+            with open(threshold_path, "r") as f:
+                autoencoder_threshold = float(f.read())
+            print("✅ Loaded autoencoder threshold.")
+        else:
+            raise RuntimeError("autoencoder_threshold.txt missing.")
 
-    # Load GNN artifacts if present
-    gnn_probs_path = os.path.join(HERE, "gnn_probs.npy")
-    post_node_map_path = os.path.join(HERE, "post_node_map.json")
-    if os.path.exists(gnn_probs_path) and os.path.exists(post_node_map_path):
-        gnn_probs = np.load(gnn_probs_path)
-        with open(post_node_map_path, "r") as f:
-            post_node_map = json.load(f)
-        print("✅ Loaded real-graph GCN artifacts.")
-    else:
-        print("⚠️ GNN artifacts not found, continuing without them.")
+        # Apply optional multiplier from env var
+        try:
+            multiplier = float(os.environ.get('AE_THRESHOLD_MULTIPLIER', '1.0'))
+        except Exception:
+            multiplier = 1.0
+        effective_autoencoder_threshold = float(autoencoder_threshold * multiplier)
+        print(f"Effective AE threshold set to {effective_autoencoder_threshold} (multiplier={multiplier})")
 
-except Exception as e:
-    MODEL_LOAD_ERROR = str(e)
-    print(f"❌ Error loading models: {e}")
+        # Load GNN artifacts if present
+        gnn_probs_path = os.path.join(HERE, "gnn_probs.npy")
+        post_node_map_path = os.path.join(HERE, "post_node_map.json")
+        if os.path.exists(gnn_probs_path) and os.path.exists(post_node_map_path):
+            gnn_probs = np.load(gnn_probs_path)
+            with open(post_node_map_path, "r") as f:
+                post_node_map = json.load(f)
+            print("✅ Loaded real-graph GCN artifacts.")
+        else:
+            print("⚠️ GNN artifacts not found, continuing without them.")
+
+        models_last_loaded_at = __import__('datetime').datetime.utcnow().isoformat() + 'Z'
+
+    except Exception as e:
+        MODEL_LOAD_ERROR = str(e)
+        print(f"❌ Error loading models: {e}")
+
+
+# Load models at startup
+load_models()
 
 # --- Firestore Client ---
 fs_db = None
@@ -222,7 +251,9 @@ def predict():
         scaled_features = scaler.transform(features)
         recon = autoencoder_model.predict(scaled_features, verbose=0)
         error = float(np.mean(np.square(scaled_features - recon)))
-        content_score = float(min(error / (autoencoder_threshold * 2), 1.0))
+        # Use effective threshold (multiplier-aware) if available
+        thr = effective_autoencoder_threshold if effective_autoencoder_threshold is not None else autoencoder_threshold
+        content_score = float(min(error / (thr * 2), 1.0))
         
         # 2. Structural Score from precomputed artifacts (default 0.5 if missing)
         structural_score = 0.5
@@ -233,12 +264,13 @@ def predict():
 
         # 3. Fuse Scores
         final_score = float((content_score * 0.6) + (structural_score * 0.4))
-        is_phishing = bool(final_score > 0.5)
+        decision_cutoff = float(os.environ.get('FINAL_SCORE_CUTOFF', '0.5'))
+        is_phishing = bool(final_score > decision_cutoff)
         
         used_gcn = bool(post_node_map is not None and gnn_probs is not None)
         # Detailed log for debugging
         print(f"URL: {url} | recon_error={error:.6f} content={content_score:.3f} gcn={structural_score:.3f} final={final_score:.3f} | phishing={is_phishing} gcn_used={used_gcn}")
-        return jsonify({'is_phishing': is_phishing, 'used_gcn': used_gcn, 'final_score': final_score, 'reconstruction_error': error, 'content_score': content_score})
+        return jsonify({'is_phishing': is_phishing, 'used_gcn': used_gcn, 'final_score': final_score, 'reconstruction_error': error, 'content_score': content_score, 'ae_threshold_used': thr})
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -275,8 +307,11 @@ def predict_batch():
             structural_scores = np.full(len(post_ids), 0.5, dtype=float)
 
         # 3. Fuse Scores
+        # Use effective threshold for content_score scaling
+        thr = effective_autoencoder_threshold if effective_autoencoder_threshold is not None else autoencoder_threshold
         final_scores = (0.6 * content_scores) + (0.4 * structural_scores)
-        preds = (final_scores > 0.5).tolist()
+        decision_cutoff = float(os.environ.get('FINAL_SCORE_CUTOFF', '0.5'))
+        preds = (final_scores > decision_cutoff).tolist()
 
         used_gcn = bool(post_node_map is not None and gnn_probs is not None)
         # Log detailed per-item diagnostics
@@ -284,7 +319,7 @@ def predict_batch():
             print(f"BATCH URL: {u} | recon_error={float(err):.6f} content={float(csc):.3f} gcn={float(gsc):.3f} final={float(fin):.3f} | phishing={bool(pr)}")
 
         return jsonify({'predictions': [
-            { 'url': url, 'post_id': pid, 'is_phishing': bool(pred), 'used_gcn': used_gcn, 'reconstruction_error': float(err), 'content_score': float(csc), 'final_score': float(fin) }
+            { 'url': url, 'post_id': pid, 'is_phishing': bool(pred), 'used_gcn': used_gcn, 'reconstruction_error': float(err), 'content_score': float(csc), 'final_score': float(fin), 'ae_threshold_used': thr }
             for url, pid, pred, err, csc, fin in zip(urls, post_ids, preds, errors.tolist(), content_scores.tolist(), final_scores.tolist())
         ]})
 
@@ -312,6 +347,28 @@ def report():
         return jsonify({'status': 'ok'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/reload_models', methods=['POST'])
+def reload_models_endpoint():
+    # security: restrict in production; for now anyone can call
+    load_models()
+    if MODEL_LOAD_ERROR:
+        return jsonify({'status': 'error', 'message': MODEL_LOAD_ERROR}), 500
+    return jsonify({'status': 'ok', 'models_last_loaded_at': models_last_loaded_at})
+
+
+@app.route('/model_info', methods=['GET'])
+def model_info():
+    info = {
+        'models_ready': bool(autoencoder_model is not None and scaler is not None and autoencoder_threshold is not None),
+        'autoencoder_threshold': autoencoder_threshold,
+        'effective_ae_threshold': effective_autoencoder_threshold,
+        'scaler_type': type(scaler).__name__ if scaler is not None else None,
+        'gnn_loaded': bool(gnn_probs is not None and post_node_map is not None),
+        'models_last_loaded_at': models_last_loaded_at,
+    }
+    return jsonify(info)
 
 @app.route('/flag', methods=['POST'])
 def flag():
