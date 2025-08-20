@@ -7,6 +7,7 @@ import tensorflow as tf
 import re
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 import tldextract
+import requests
 import json
 import os
 from google.oauth2 import service_account
@@ -147,6 +148,32 @@ def _compute_lexical_subset(url: str) -> dict:
     except Exception:
         u = url or ""
     parts = tldextract.extract(u)
+    # If URL is a known shortener, optionally resolve to the final destination to extract better features
+    try:
+        short_domain = (parts.domain + ('.' + parts.suffix if parts.suffix else '')).lower()
+        resolve_short = os.environ.get('RESOLVE_SHORTENERS', '1') in ('1', 'true', 'yes')
+        if resolve_short and short_domain in shorteners:
+            try:
+                # Follow redirects to get final URL (use HEAD then GET fallback)
+                r = requests.head(u, allow_redirects=True, timeout=3)
+                final_url = r.url if r and r.url else u
+            except Exception:
+                try:
+                    r = requests.get(u, allow_redirects=True, timeout=5)
+                    final_url = r.url if r and r.url else u
+                except Exception:
+                    final_url = u
+            # Replace u and recompute parts for final URL
+            if final_url and final_url != u:
+                try:
+                    u = final_url
+                    parts = tldextract.extract(u)
+                    domain = ".".join([p for p in [parts.subdomain, parts.domain, parts.suffix] if p])
+                    path_q = u.split(domain, 1)[-1] if domain and domain in u else ""
+                except Exception:
+                    pass
+    except Exception:
+        pass
     domain = ".".join([p for p in [parts.subdomain, parts.domain, parts.suffix] if p])
     path_q = u.split(domain, 1)[-1] if domain and domain in u else ""
     shorteners = {"bit.ly","tinyurl.com","t.co","goo.gl","ow.ly","is.gd","cutt.ly","lnkd.in","buff.ly"}
