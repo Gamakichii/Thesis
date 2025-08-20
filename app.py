@@ -262,15 +262,19 @@ def predict():
             if idx is not None and 0 <= idx < len(gnn_probs):
                 structural_score = float(gnn_probs[idx])
 
-        # 3. Fuse Scores
-        final_score = float((content_score * 0.6) + (structural_score * 0.4))
+        # 3. Fuse Scores (AE weight configurable via AE_WEIGHT env var)
+        try:
+            ae_weight = float(os.environ.get('AE_WEIGHT', '0.6'))
+        except Exception:
+            ae_weight = 0.6
+        final_score = float((content_score * ae_weight) + (structural_score * (1.0 - ae_weight)))
         decision_cutoff = float(os.environ.get('FINAL_SCORE_CUTOFF', '0.5'))
         is_phishing = bool(final_score > decision_cutoff)
         
         used_gcn = bool(post_node_map is not None and gnn_probs is not None)
         # Detailed log for debugging
         print(f"URL: {url} | recon_error={error:.6f} content={content_score:.3f} gcn={structural_score:.3f} final={final_score:.3f} | phishing={is_phishing} gcn_used={used_gcn}")
-        return jsonify({'is_phishing': is_phishing, 'used_gcn': used_gcn, 'final_score': final_score, 'reconstruction_error': error, 'content_score': content_score, 'ae_threshold_used': thr})
+        return jsonify({'is_phishing': is_phishing, 'used_gcn': used_gcn, 'final_score': final_score, 'reconstruction_error': error, 'content_score': content_score, 'ae_threshold_used': thr, 'ae_weight': ae_weight, 'final_score_cutoff': decision_cutoff})
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -294,7 +298,9 @@ def predict_batch():
         scaled = scaler.transform(feats)
         recon = autoencoder_model.predict(scaled, verbose=0)
         errors = np.mean(np.square(scaled - recon), axis=1)
-        content_scores = np.minimum(errors / (autoencoder_threshold * 2), 1.0)
+        # Use effective threshold if available
+        thr = effective_autoencoder_threshold if effective_autoencoder_threshold is not None else autoencoder_threshold
+        content_scores = np.minimum(errors / (thr * 2), 1.0)
 
         # 2. Structural Scores from artifacts (or 0.5 if unavailable)
         if post_node_map is not None and gnn_probs is not None:
@@ -306,10 +312,12 @@ def predict_batch():
         else:
             structural_scores = np.full(len(post_ids), 0.5, dtype=float)
 
-        # 3. Fuse Scores
-        # Use effective threshold for content_score scaling
-        thr = effective_autoencoder_threshold if effective_autoencoder_threshold is not None else autoencoder_threshold
-        final_scores = (0.6 * content_scores) + (0.4 * structural_scores)
+        # 3. Fuse Scores (configurable AE weight)
+        try:
+            ae_weight = float(os.environ.get('AE_WEIGHT', '0.6'))
+        except Exception:
+            ae_weight = 0.6
+        final_scores = (ae_weight * content_scores) + ((1.0 - ae_weight) * structural_scores)
         decision_cutoff = float(os.environ.get('FINAL_SCORE_CUTOFF', '0.5'))
         preds = (final_scores > decision_cutoff).tolist()
 
@@ -319,7 +327,7 @@ def predict_batch():
             print(f"BATCH URL: {u} | recon_error={float(err):.6f} content={float(csc):.3f} gcn={float(gsc):.3f} final={float(fin):.3f} | phishing={bool(pr)}")
 
         return jsonify({'predictions': [
-            { 'url': url, 'post_id': pid, 'is_phishing': bool(pred), 'used_gcn': used_gcn, 'reconstruction_error': float(err), 'content_score': float(csc), 'final_score': float(fin), 'ae_threshold_used': thr }
+            { 'url': url, 'post_id': pid, 'is_phishing': bool(pred), 'used_gcn': used_gcn, 'reconstruction_error': float(err), 'content_score': float(csc), 'final_score': float(fin), 'ae_threshold_used': thr, 'ae_weight': ae_weight, 'final_score_cutoff': decision_cutoff }
             for url, pid, pred, err, csc, fin in zip(urls, post_ids, preds, errors.tolist(), content_scores.tolist(), final_scores.tolist())
         ]})
 
@@ -347,6 +355,34 @@ def report():
         return jsonify({'status': 'ok'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/report_bulk', methods=['POST'])
+def report_bulk():
+    """Accept a batch of report objects and store them in Firestore.
+    Expected JSON: { "items": [ {"app_id":..., "type":..., "payload":..., "userId":...}, ... ] }
+    """
+    if not _fs_ok():
+        return jsonify({'error': 'Firestore not configured on server'}), 500
+    data = request.get_json() or {}
+    items = data.get('items') or []
+    if not isinstance(items, list) or len(items) == 0:
+        return jsonify({'status': 'ok', 'written': 0})
+    written = 0
+    try:
+        for it in items:
+            app_id = it.get('app_id')
+            rtype = it.get('type')
+            payload = it.get('payload') or {}
+            user_id = it.get('userId') or 'anon'
+            if not app_id or not rtype:
+                continue
+            col = fs_db.collection(f"artifacts/{app_id}/private_user_reports")
+            col.add({'type': rtype, 'payload': payload, 'userId': user_id, 'timestamp': firestore.SERVER_TIMESTAMP})
+            written += 1
+        return jsonify({'status': 'ok', 'written': written})
+    except Exception as e:
+        return jsonify({'error': str(e), 'written': written}), 500
 
 
 @app.route('/reload_models', methods=['POST'])

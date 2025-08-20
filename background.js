@@ -227,16 +227,92 @@ function setCachedPrediction(urlLower, value) {
     predictionCache.set(urlLower, { ...value, ts: Date.now() });
 }
 
-// Server-side report helper to centralize labels for training
-async function serverReport(rtype, payload) {
+// Batched server-side reporting helper to centralize labels for training
+const REPORT_QUEUE = [];
+const REPORT_BATCH_SIZE = 10; // flush when this many collected
+const REPORT_FLUSH_MS = 30 * 1000; // flush every 30s
+const REPORT_STORAGE_KEY = 'dakugumen_report_queue';
+
+function saveReportQueueToStorage() {
     try {
-        const body = { app_id: appId, type: rtype, payload: payload || {}, userId: userId || 'anon' };
-        await fetch(`${API_BASE_URL}/report`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-        });
+        if (chrome && chrome.storage && chrome.storage.local) {
+            chrome.storage.local.set({ [REPORT_STORAGE_KEY]: REPORT_QUEUE }, () => {
+                // ignore errors; storage quota may apply
+            });
+        }
     } catch (e) {
-        console.warn('serverReport failed', e);
+        console.warn('saveReportQueueToStorage failed', e);
     }
+}
+
+function loadReportQueueFromStorage() {
+    try {
+        if (chrome && chrome.storage && chrome.storage.local) {
+            chrome.storage.local.get([REPORT_STORAGE_KEY], (res) => {
+                try {
+                    const items = (res && res[REPORT_STORAGE_KEY]) || [];
+                    if (Array.isArray(items) && items.length > 0) {
+                        // push items keeping existing in-memory queue
+                        for (const it of items) {
+                            REPORT_QUEUE.push(it);
+                        }
+                        console.log(`Loaded ${items.length} queued reports from storage`);
+                    }
+                } catch (e) { console.warn('Error reading stored report queue', e); }
+            });
+        }
+    } catch (e) {
+        console.warn('loadReportQueueFromStorage failed', e);
+    }
+}
+
+function enqueueServerReport(rtype, payload) {
+    try {
+        const item = { app_id: appId, type: rtype, payload: payload || {}, userId: userId || 'anon' };
+        REPORT_QUEUE.push(item);
+        if (REPORT_QUEUE.length >= REPORT_BATCH_SIZE) {
+            flushReportQueue();
+        }
+        // Persist queue after enqueue
+        saveReportQueueToStorage();
+    } catch (e) {
+        console.warn('enqueueServerReport failed', e);
+    }
+}
+
+async function flushReportQueue() {
+    if (REPORT_QUEUE.length === 0) return;
+    // Copy a batch and attempt to send
+    const batch = REPORT_QUEUE.slice(0, REPORT_BATCH_SIZE);
+    try {
+        const res = await fetch(`${API_BASE_URL}/report_bulk`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: batch })
+        });
+        if (!res.ok) {
+            const txt = await res.text();
+            console.warn('report_bulk returned non-ok:', res.status, txt);
+            return; // will retry on next flush
+        }
+        const data = await res.json();
+        // On success, remove sent items from queue
+        REPORT_QUEUE.splice(0, batch.length);
+        console.log(`Flushed ${batch.length} reports to server. Remaining queue: ${REPORT_QUEUE.length}`);
+        // Persist updated queue
+        saveReportQueueToStorage();
+    } catch (e) {
+        console.warn('flushReportQueue failed', e);
+        // keep items in queue for next attempt
+    }
+}
+
+// Periodic flush
+setInterval(() => { try { flushReportQueue(); } catch (e) { console.warn('periodic flush failed', e); } }, REPORT_FLUSH_MS);
+// Load persisted queue on startup
+try { loadReportQueueFromStorage(); } catch (e) { console.warn('initial queue load failed', e); }
+
+// Backwards-compatible alias used throughout the code
+async function serverReport(rtype, payload) {
+    enqueueServerReport(rtype, payload);
 }
 
 async function getBackendPredictionForLink(url, postId) {
