@@ -16,8 +16,22 @@ import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnap
     measurementId: "G-79ECP9L5YV"
   };
   const initialAuthToken = null; // keep null; we use anonymous auth
-  // Backend API base URL (can be overridden by page-injected global __api_base)
-  const API_BASE_URL = "https://dakugumen-api.mangosea-8f507dd6.southeastasia.azurecontainerapps.io"; // your container URL
+  // Backend API base URL (can be overridden via `chrome.storage.sync` key `api_base_url`)
+  const DEFAULT_API_BASE_URL = "https://dakugumen-api.mangosea-8f507dd6.southeastasia.azurecontainerapps.io"; // your container URL
+  let API_BASE_URL = DEFAULT_API_BASE_URL;
+
+  // Try to load override from chrome.storage.sync (useful for local testing)
+  try {
+    chrome.storage && chrome.storage.sync && chrome.storage.sync.get(['api_base_url'], (res) => {
+      if (res && res.api_base_url) {
+        API_BASE_URL = res.api_base_url;
+      }
+      console.log('API_BASE_URL set to', API_BASE_URL);
+    });
+  } catch (e) {
+    // If storage isn't available for some reason, keep default
+    console.log('chrome.storage.sync not available, using default API_BASE_URL', API_BASE_URL);
+  }
 
 
 let app;
