@@ -207,8 +207,9 @@ def predict():
         # 1. Content Score
         features = extract_features_for_urls([url])
         scaled_features = scaler.transform(features)
-        error = np.mean(np.square(scaled_features - autoencoder_model.predict(scaled_features, verbose=0)))
-        content_score = min(error / (autoencoder_threshold * 2), 1.0)
+        recon = autoencoder_model.predict(scaled_features, verbose=0)
+        error = float(np.mean(np.square(scaled_features - recon)))
+        content_score = float(min(error / (autoencoder_threshold * 2), 1.0))
         
         # 2. Structural Score from precomputed artifacts (default 0.5 if missing)
         structural_score = 0.5
@@ -218,12 +219,13 @@ def predict():
                 structural_score = float(gnn_probs[idx])
 
         # 3. Fuse Scores
-        final_score = (content_score * 0.6) + (structural_score * 0.4)
-        is_phishing = final_score > 0.5
+        final_score = float((content_score * 0.6) + (structural_score * 0.4))
+        is_phishing = bool(final_score > 0.5)
         
         used_gcn = bool(post_node_map is not None and gnn_probs is not None)
-        print(f"URL: {url} | content={content_score:.2f} gcn={structural_score:.2f} final={final_score:.2f} | phishing={is_phishing} gcn_used={used_gcn}")
-        return jsonify({'is_phishing': is_phishing, 'used_gcn': used_gcn, 'final_score': final_score})
+        # Detailed log for debugging
+        print(f"URL: {url} | recon_error={error:.6f} content={content_score:.3f} gcn={structural_score:.3f} final={final_score:.3f} | phishing={is_phishing} gcn_used={used_gcn}")
+        return jsonify({'is_phishing': is_phishing, 'used_gcn': used_gcn, 'final_score': final_score, 'reconstruction_error': error, 'content_score': content_score})
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -264,9 +266,13 @@ def predict_batch():
         preds = (final_scores > 0.5).tolist()
 
         used_gcn = bool(post_node_map is not None and gnn_probs is not None)
+        # Log detailed per-item diagnostics
+        for u, pid, err, csc, gsc, fin, pr in zip(urls, post_ids, errors, content_scores, structural_scores, final_scores, preds):
+            print(f"BATCH URL: {u} | recon_error={float(err):.6f} content={float(csc):.3f} gcn={float(gsc):.3f} final={float(fin):.3f} | phishing={bool(pr)}")
+
         return jsonify({'predictions': [
-            { 'url': url, 'post_id': pid, 'is_phishing': pred, 'used_gcn': used_gcn }
-            for url, pid, pred in zip(urls, post_ids, preds)
+            { 'url': url, 'post_id': pid, 'is_phishing': bool(pred), 'used_gcn': used_gcn, 'reconstruction_error': float(err), 'content_score': float(csc), 'final_score': float(fin) }
+            for url, pid, pred, err, csc, fin in zip(urls, post_ids, preds, errors.tolist(), content_scores.tolist(), final_scores.tolist())
         ]})
 
     except Exception as e:
