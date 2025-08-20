@@ -10,6 +10,7 @@ import tldextract
 import requests
 import json
 import os
+import collections
 from google.oauth2 import service_account
 from google.cloud import firestore
 
@@ -32,6 +33,13 @@ effective_autoencoder_threshold = None
 gnn_probs = None
 post_node_map = None
 models_last_loaded_at = None
+classifier = None
+classifier_meta = None
+
+# Simple LRU cache for resolved shorteners
+RESOLVED_SHORTENER_CACHE = {}
+RESOLVED_SHORTENER_ORDER = collections.deque()
+RESOLVED_SHORTENER_MAX = int(os.environ.get('SHORTENER_CACHE_MAX', '1024'))
 
 
 def load_models():
@@ -97,6 +105,21 @@ def load_models():
         else:
             print("⚠️ GNN artifacts not found, continuing without them.")
 
+        # Load optional supervised classifier if present
+        clf_path = os.path.join(HERE, 'phishing_classifier.pkl')
+        meta_path = os.path.join(HERE, 'classifier_meta.json')
+        try:
+            if os.path.exists(clf_path) and os.path.exists(meta_path):
+                with open(clf_path, 'rb') as f:
+                    classifier = pickle.load(f)
+                with open(meta_path, 'r') as f:
+                    classifier_meta = json.load(f)
+                print('✅ Loaded supervised classifier and meta.')
+            else:
+                print('No supervised classifier artifact found.')
+        except Exception as e:
+            print('Error loading classifier artifact:', e)
+
         models_last_loaded_at = __import__('datetime').datetime.utcnow().isoformat() + 'Z'
 
     except Exception as e:
@@ -149,31 +172,45 @@ def _compute_lexical_subset(url: str) -> dict:
         u = url or ""
     parts = tldextract.extract(u)
     # If URL is a known shortener, optionally resolve to the final destination to extract better features
-    try:
-        short_domain = (parts.domain + ('.' + parts.suffix if parts.suffix else '')).lower()
-        resolve_short = os.environ.get('RESOLVE_SHORTENERS', '1') in ('1', 'true', 'yes')
-        if resolve_short and short_domain in shorteners:
-            try:
-                # Follow redirects to get final URL (use HEAD then GET fallback)
-                r = requests.head(u, allow_redirects=True, timeout=3)
-                final_url = r.url if r and r.url else u
-            except Exception:
+    short_domain = (parts.domain + ('.' + parts.suffix if parts.suffix else '')).lower()
+    resolve_short = os.environ.get('RESOLVE_SHORTENERS', '1') in ('1', 'true', 'yes')
+    if resolve_short and short_domain in shorteners:
+        final_url = None
+        try:
+            # Use LRU cache to avoid repeated network calls
+            if u in RESOLVED_SHORTENER_CACHE:
+                final_url = RESOLVED_SHORTENER_CACHE[u]
+            else:
                 try:
-                    r = requests.get(u, allow_redirects=True, timeout=5)
-                    final_url = r.url if r and r.url else u
+                    r = requests.head(u, allow_redirects=True, timeout=3)
+                    final_url = r.url if r and getattr(r, 'url', None) else u
                 except Exception:
-                    final_url = u
-            # Replace u and recompute parts for final URL
-            if final_url and final_url != u:
+                    try:
+                        r = requests.get(u, allow_redirects=True, timeout=5)
+                        final_url = r.url if r and getattr(r, 'url', None) else u
+                    except Exception:
+                        final_url = u
+                # update LRU cache
                 try:
-                    u = final_url
-                    parts = tldextract.extract(u)
-                    domain = ".".join([p for p in [parts.subdomain, parts.domain, parts.suffix] if p])
-                    path_q = u.split(domain, 1)[-1] if domain and domain in u else ""
+                    RESOLVED_SHORTENER_CACHE[u] = final_url
+                    RESOLVED_SHORTENER_ORDER.append(u)
+                    if len(RESOLVED_SHORTENER_ORDER) > RESOLVED_SHORTENER_MAX:
+                        old = RESOLVED_SHORTENER_ORDER.popleft()
+                        RESOLVED_SHORTENER_CACHE.pop(old, None)
                 except Exception:
                     pass
-    except Exception:
-        pass
+        except Exception:
+            final_url = u
+
+        # Replace u and recompute parts for final URL if resolution changed
+        if final_url and final_url != u:
+            try:
+                u = final_url
+                parts = tldextract.extract(u)
+                domain = ".".join([p for p in [parts.subdomain, parts.domain, parts.suffix] if p])
+                path_q = u.split(domain, 1)[-1] if domain and domain in u else ""
+            except Exception:
+                pass
     domain = ".".join([p for p in [parts.subdomain, parts.domain, parts.suffix] if p])
     path_q = u.split(domain, 1)[-1] if domain and domain in u else ""
     shorteners = {"bit.ly","tinyurl.com","t.co","goo.gl","ow.ly","is.gd","cutt.ly","lnkd.in","buff.ly"}
@@ -299,9 +336,22 @@ def predict():
         is_phishing = bool(final_score > decision_cutoff)
         
         used_gcn = bool(post_node_map is not None and gnn_probs is not None)
+        # 4. Optional supervised classifier override/score
+        classifier_prob = None
+        try:
+            if classifier is not None and classifier_meta is not None:
+                # Build classifier feature vector: [content_score, gcn_prob] + scaled_features
+                gcn_p = structural_score
+                clf_vec = np.concatenate(([content_score, gcn_p], scaled_features[0])).reshape(1, -1)
+                classifier_prob = float(classifier.predict_proba(clf_vec)[0,1])
+                # If classifier strongly predicts phishing, bump final score
+                if classifier_prob > float(os.environ.get('CLASSIFIER_OVERRIDE_THRESHOLD', '0.75')):
+                    final_score = max(final_score, classifier_prob)
+        except Exception as e:
+            print('Classifier scoring failed:', e)
         # Detailed log for debugging
         print(f"URL: {url} | recon_error={error:.6f} content={content_score:.3f} gcn={structural_score:.3f} final={final_score:.3f} | phishing={is_phishing} gcn_used={used_gcn}")
-        return jsonify({'is_phishing': is_phishing, 'used_gcn': used_gcn, 'final_score': final_score, 'reconstruction_error': error, 'content_score': content_score, 'ae_threshold_used': thr, 'ae_weight': ae_weight, 'final_score_cutoff': decision_cutoff})
+        return jsonify({'is_phishing': is_phishing, 'used_gcn': used_gcn, 'final_score': final_score, 'reconstruction_error': error, 'content_score': content_score, 'ae_threshold_used': thr, 'ae_weight': ae_weight, 'final_score_cutoff': decision_cutoff, 'classifier_prob': classifier_prob})
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
