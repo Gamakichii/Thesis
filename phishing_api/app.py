@@ -10,21 +10,21 @@ import json
 import os
 from google.cloud import firestore
 from google.oauth2 import service_account
-import os
 
-# Point to the Firebase service account JSON
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "firebase-sa.json"
+# Prefer env override; do not overwrite an existing credential path
+os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", "firebase-sa.json")
 
-# Import Firestore client after setting the env
-from google.cloud import firestore
-db = firestore.Client()
-
+# Do NOT instantiate a Firestore client at import time (containers may not have
+# ADC). `fs_db` will be initialized in the guarded block below.
 # --- Initialize App and Load Models ---
 app = Flask(__name__)
 CORS(app, origins=["*"])  # Allow all origins for Chrome extension
 
 # Get port from environment variable (Azure provides this)
 PORT = int(os.environ.get('PORT', 8000))
+
+# Base directory for model/artifact files
+here = os.path.dirname(os.path.abspath(__file__))
 
 MODEL_LOAD_ERROR = None
 try:
@@ -33,16 +33,16 @@ try:
     try:
         import keras  # Keras 3
         os.environ.setdefault("KERAS_BACKEND", "tensorflow")
-        autoencoder_model = keras.models.load_model('phishing_autoencoder_model.keras')
+        autoencoder_model = keras.models.load_model(os.path.join(here, 'phishing_autoencoder_model.keras'))
         print("✅ Loaded autoencoder model with Keras 3.")
     except Exception as e_k3:
         print(f"⚠️ Keras 3 load failed, trying tf.keras: {e_k3}")
-        autoencoder_model = tf.keras.models.load_model('phishing_autoencoder_model.keras')
+        autoencoder_model = tf.keras.models.load_model(os.path.join(here, 'phishing_autoencoder_model.keras'))
         print("✅ Loaded autoencoder model with tf.keras.")
 
     # Load scaler (try primary name, then fallback)
     scaler = None
-    scaler_paths = ['scaler.pkl', 'scaler_final.pkl']
+    scaler_paths = [os.path.join(here, 'scaler.pkl'), os.path.join(here, 'scaler_final.pkl')]
     last_scaler_err = None
     for sp in scaler_paths:
         try:
@@ -57,16 +57,18 @@ try:
         raise RuntimeError(f"Failed to load scaler from {scaler_paths}: {last_scaler_err}")
 
     # Load threshold
-    with open('autoencoder_threshold.txt', 'r') as f:
+    with open(os.path.join(here, 'autoencoder_threshold.txt'), 'r') as f:
         autoencoder_threshold = float(f.read())
 
     # Try to load precomputed real-graph artifacts first
     gnn_probs = None
     post_node_map = None
-    if os.path.exists('gnn_probs.npy') and os.path.exists('post_node_map.json'):
+    gnn_path = os.path.join(here, 'gnn_probs.npy')
+    post_map_path = os.path.join(here, 'post_node_map.json')
+    if os.path.exists(gnn_path) and os.path.exists(post_map_path):
         try:
-            gnn_probs = np.load('gnn_probs.npy')
-            with open('post_node_map.json', 'r') as f:
+            gnn_probs = np.load(gnn_path)
+            with open(post_map_path, 'r') as f:
                 post_node_map = json.load(f)
             print('✅ Loaded real-graph GCN artifacts (gnn_probs.npy, post_node_map.json).')
         except Exception as e:
@@ -76,6 +78,19 @@ try:
 except Exception as e:
     MODEL_LOAD_ERROR = str(e)
     print(f"❌ Error loading models: {e}")
+    # Diagnostic: list files in the app directory to help debug missing artifacts
+    try:
+        print("🔍 Listing files in model directory for diagnostics:")
+        for fname in sorted(os.listdir(here)):
+            try:
+                fpath = os.path.join(here, fname)
+                size = os.path.getsize(fpath)
+                print(f" - {fname}: {size} bytes")
+            except Exception as _fi:
+                print(f" - {fname}: <stat-failed>")
+    except Exception as _l:
+        print(" - Could not list directory contents:", _l)
+
     autoencoder_model, scaler, autoencoder_threshold = None, None, None
     post_node_map, gnn_probs = None, None
 
@@ -200,6 +215,26 @@ def ready_check():
         'models_ready': bool(autoencoder_model is not None and scaler is not None and autoencoder_threshold is not None),
         'error': MODEL_LOAD_ERROR,
     }), (200 if autoencoder_model is not None and scaler is not None and autoencoder_threshold is not None else 503)
+
+
+@app.route('/models_status')
+def models_status():
+    """Return diagnostics about model loading and which artifact files exist."""
+    files = {}
+    try:
+        for fname in sorted(os.listdir(here)):
+            try:
+                fpath = os.path.join(here, fname)
+                files[fname] = os.path.getsize(fpath)
+            except Exception:
+                files[fname] = None
+    except Exception as e:
+        files = {'error_listing': str(e)}
+    return jsonify({
+        'models_ready': bool(autoencoder_model is not None and scaler is not None and autoencoder_threshold is not None),
+        'model_load_error': MODEL_LOAD_ERROR,
+        'files': files,
+    })
 
 # --- API Endpoints ---
 @app.route('/predict', methods=['POST'])
