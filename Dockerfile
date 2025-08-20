@@ -1,30 +1,27 @@
-# Use official Python 3.11 slim image
-FROM python:3.11-slim
+# Use slim Python
+FROM python:3.10-slim
 
-# Set working directory inside container
 WORKDIR /app
 
-# Install OS libraries required by TensorFlow and numpy
+# Install system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 libstdc++6 libgl1 libglib2.0-0 && \
-    rm -rf /var/lib/apt/lists/*
+    build-essential gcc \
+ && rm -rf /var/lib/apt/lists/*
 
-# Copy only requirements.txt first to leverage Docker cache
-COPY phishing_api/requirements.txt ./phishing_api/requirements.txt
+# Copy requirements first
+COPY requirements.txt .
 
-# Upgrade pip and install dependencies
-RUN pip install --upgrade pip
-RUN pip install --no-cache-dir -r ./phishing_api/requirements.txt
+# Install Python deps
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the source code including models and Firestore credentials
-COPY phishing_api/ ./phishing_api/
-COPY startup.sh /startup.sh
+# Copy app code
+COPY . .
 
-# Make startup.sh executable
-RUN chmod +x /startup.sh
+# Expose port 80 (for Azure)
+EXPOSE 80
 
-# Expose the port (Gunicorn will use $PORT in startup.sh)
-EXPOSE 8000
+# Ensure startup.sh has execute permissions
+RUN chmod +x startup.sh
 
-# Use startup.sh as the entrypoint
-ENTRYPOINT ["/startup.sh"]
+# Startup script
+CMD ["./startup.sh"]

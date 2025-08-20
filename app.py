@@ -8,107 +8,98 @@ import re
 import tldextract
 import json
 import os
-from google.cloud import firestore
 from google.oauth2 import service_account
-import os
-
-# Point to the Firebase service account JSON
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "firebase-sa.json"
-
-# Import Firestore client after setting the env
 from google.cloud import firestore
-db = firestore.Client()
 
-# --- Initialize App and Load Models ---
+# --- Define the base directory for model artifacts ---
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+# --- Initialize App ---
 app = Flask(__name__)
 CORS(app, origins=["*"])  # Allow all origins for Chrome extension
 
-# Get port from environment variable (Azure provides this)
-PORT = int(os.environ.get('PORT', 8000))
+# Azure Container App will inject PORT
+PORT = int(os.environ.get("PORT", 8000))
 
+# --- Model Loading ---
 MODEL_LOAD_ERROR = None
+autoencoder_model = None
+scaler = None
+autoencoder_threshold = None
+gnn_probs = None
+post_node_map = None
+
 try:
-    # Prefer native Keras 3 loader for .keras format; fallback to tf.keras
-    autoencoder_model = None
+    # Load Autoencoder model (.keras)
+    model_path = os.path.join(HERE, "phishing_autoencoder_model.keras")
     try:
         import keras  # Keras 3
         os.environ.setdefault("KERAS_BACKEND", "tensorflow")
-        autoencoder_model = keras.models.load_model('phishing_autoencoder_model.keras')
+        autoencoder_model = keras.models.load_model(model_path)
         print("✅ Loaded autoencoder model with Keras 3.")
     except Exception as e_k3:
         print(f"⚠️ Keras 3 load failed, trying tf.keras: {e_k3}")
-        autoencoder_model = tf.keras.models.load_model('phishing_autoencoder_model.keras')
+        autoencoder_model = tf.keras.models.load_model(model_path)
         print("✅ Loaded autoencoder model with tf.keras.")
 
-    # Load scaler (try primary name, then fallback)
-    scaler = None
-    scaler_paths = ['scaler.pkl', 'scaler_final.pkl']
-    last_scaler_err = None
-    for sp in scaler_paths:
-        try:
-            with open(sp, 'rb') as f:
+    # Load Scaler (try scaler.pkl then scaler_final.pkl)
+    for sp in [os.path.join(HERE, "scaler.pkl"), os.path.join(HERE, "scaler_final.pkl")]:
+        if os.path.exists(sp):
+            with open(sp, "rb") as f:
                 scaler = pickle.load(f)
                 print(f"✅ Loaded scaler from {sp}.")
                 break
-        except Exception as se:
-            last_scaler_err = se
-            continue
     if scaler is None:
-        raise RuntimeError(f"Failed to load scaler from {scaler_paths}: {last_scaler_err}")
+        raise RuntimeError("Scaler file not found.")
 
-    # Load threshold
-    with open('autoencoder_threshold.txt', 'r') as f:
-        autoencoder_threshold = float(f.read())
+    # Load Threshold
+    threshold_path = os.path.join(HERE, "autoencoder_threshold.txt")
+    if os.path.exists(threshold_path):
+        with open(threshold_path, "r") as f:
+            autoencoder_threshold = float(f.read())
+        print("✅ Loaded autoencoder threshold.")
+    else:
+        raise RuntimeError("autoencoder_threshold.txt missing.")
 
-    # Try to load precomputed real-graph artifacts first
-    gnn_probs = None
-    post_node_map = None
-    if os.path.exists('gnn_probs.npy') and os.path.exists('post_node_map.json'):
-        try:
-            gnn_probs = np.load('gnn_probs.npy')
-            with open('post_node_map.json', 'r') as f:
-                post_node_map = json.load(f)
-            print('✅ Loaded real-graph GCN artifacts (gnn_probs.npy, post_node_map.json).')
-        except Exception as e:
-            print('❌ Failed loading real-graph artifacts:', e)
+    # Load GNN artifacts if present
+    gnn_probs_path = os.path.join(HERE, "gnn_probs.npy")
+    post_node_map_path = os.path.join(HERE, "post_node_map.json")
+    if os.path.exists(gnn_probs_path) and os.path.exists(post_node_map_path):
+        gnn_probs = np.load(gnn_probs_path)
+        with open(post_node_map_path, "r") as f:
+            post_node_map = json.load(f)
+        print("✅ Loaded real-graph GCN artifacts.")
+    else:
+        print("⚠️ GNN artifacts not found, continuing without them.")
 
-    print("✅ All models loaded successfully.")
 except Exception as e:
     MODEL_LOAD_ERROR = str(e)
     print(f"❌ Error loading models: {e}")
-    autoencoder_model, scaler, autoencoder_threshold = None, None, None
-    post_node_map, gnn_probs = None, None
 
-# --- Firestore client for server-side writes ---
+# --- Firestore Client ---
 fs_db = None
 try:
-    # For Azure, use the service account file from environment or file
-    google_creds = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS_JSON')
+    google_creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
     if google_creds:
-        # Parse JSON from environment variable
-        import tempfile
         creds_info = json.loads(google_creds)
         creds = service_account.Credentials.from_service_account_info(creds_info)
-        fs_db = firestore.Client(credentials=creds, project=creds_info['project_id'])
+        fs_db = firestore.Client(credentials=creds, project=creds_info["project_id"])
         print("✅ Firestore client initialized from environment variable.")
     else:
-        # Fallback to local service account file
-        here = os.path.dirname(os.path.abspath(__file__))
-        candidates = [
-            os.path.join(here, 'firebase-sa.json'),
-            os.path.join(here, 'service-account.json'),
-            os.path.join(here, 'gcp-sa.json'),
-        ]
-        for sa_path in candidates:
+        # Fallback to local file
+        for sa_path in [
+            os.path.join(HERE, "firebase-sa.json"),
+            os.path.join(HERE, "service-account.json"),
+            os.path.join(HERE, "gcp-sa.json"),
+        ]:
             if os.path.exists(sa_path):
                 creds = service_account.Credentials.from_service_account_file(sa_path)
                 fs_db = firestore.Client(credentials=creds, project=creds.project_id)
-                print(f"✅ Firestore client initialized from local file: {os.path.basename(sa_path)}")
+                print(f"✅ Firestore client initialized from file: {os.path.basename(sa_path)}")
                 break
         if fs_db is None:
             print("⚠️ No Firestore credentials found. Firestore writes disabled.")
 except Exception as ee:
-    fs_db = None
     print(f"⚠️ Firestore init failed: {ee}")
 
 def _compute_lexical_subset(url: str) -> dict:
@@ -323,5 +314,6 @@ def flag():
 # Add other endpoints (graph_ingest, graph_click) as in original...
 # [Include remaining endpoints from your original app.py]
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=80)
+
