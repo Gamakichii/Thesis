@@ -11,6 +11,7 @@ import requests
 import json
 import os
 import collections
+from dotenv import load_dotenv
 from google.oauth2 import service_account
 from google.cloud import firestore
 
@@ -55,6 +56,11 @@ def load_models():
     gnn_probs = None
     post_node_map = None
     try:
+        # Load .env if present so env vars can be configured via file
+        try:
+            load_dotenv(os.path.join(HERE, '.env'))
+        except Exception:
+            pass
         # Load Autoencoder model (.keras)
         model_path = os.path.join(HERE, "phishing_autoencoder_model.keras")
         try:

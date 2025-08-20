@@ -14,3 +14,4 @@ matplotlib==3.8.1
 seaborn==0.12.2
 # Ensure protobuf compatible with gRPC
 # protobuf>=6.31.1,<7
+python-dotenv==1.0.0
