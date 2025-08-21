@@ -60,12 +60,11 @@ function linkLooksSuspicious(url) {
 }
 
 // Function to blur a specific post element
-function blurPost(postElement, postId) {
+function blurPost(postElement, postId, autoDetected = false) {
     if (postElement.dataset.phishingBlurred === 'true') return;
     if (!postElement) return;
 
     // Capture current children to apply blur only to them (not the overlay)
-    // Prefer blurring the inner content wrapper if present for speed
     let childrenToBlur = [];
     const contentWrapper = postElement.querySelector('[role="feed"], div[dir="auto"], div[data-ad-preview], div.x1lliihq');
     if (contentWrapper) {
@@ -78,7 +77,7 @@ function blurPost(postElement, postId) {
     const existingNonBlurControls = postElement.querySelector('.post-nonblur-malicious');
     if (existingNonBlurControls) existingNonBlurControls.remove();
 
-    // Create an overlay div
+    // Create an overlay div with link list and report controls
     const overlay = document.createElement('div');
     overlay.style.cssText = `
         position: absolute;
@@ -86,7 +85,7 @@ function blurPost(postElement, postId) {
         left: 0;
         width: 100%;
         height: 100%;
-        background-color: rgba(0, 0, 0, 0.8);
+        background-color: rgba(0, 0, 0, 0.85);
         color: white;
         display: flex;
         flex-direction: column;
@@ -101,12 +100,17 @@ function blurPost(postElement, postId) {
         pointer-events: auto;
     `;
     overlay.innerHTML = `
-        <p class="text-lg font-bold mb-2">⚠️ Potential Phishing Link Detected ⚠️</p>
-        <p class="text-sm mb-4">This post may contain a malicious link. Proceed with caution.</p>
-        <div class="flex gap-3">
-            <button class="unblur-button bg-red-500 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-full shadow-lg transition-all duration-200 ease-in-out">
-                View Post Anyway
-            </button>
+        <p style="font-weight:700; font-size:16px; margin:0 0 8px 0">⚠️ Potential Phishing Link Detected ⚠️</p>
+        <p style="font-size:13px; margin:0 0 12px 0">We recommend not interacting with this post. You can report it without viewing.</p>
+        <div class="links-list" style="max-width:80%; text-align:left; margin-bottom:8px; display:none;">
+          <strong>Links in this post:</strong>
+          <ul class="detected-links" style="margin-top:6px; padding-left:18px; max-height:140px; overflow:auto;"></ul>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button class="report-phish-button" style="background:#b91c1c;color:#fff;border:none;border-radius:12px;padding:8px 12px;cursor:pointer;">Report as phishing</button>
+          <button class="not-phish-button" style="background:#6b7280;color:#fff;border:none;border-radius:12px;padding:8px 12px;cursor:pointer;">Not malicious</button>
+          <button class="unblur-button" style="background:#111827;color:#fff;border:none;border-radius:12px;padding:8px 12px;cursor:pointer;">View Post Anyway</button>
+          <button class="view-details-button" style="background:#374151;color:#fff;border:none;border-radius:12px;padding:8px 12px;cursor:pointer;">Show link details</button>
         </div>
     `;
 
@@ -122,6 +126,50 @@ function blurPost(postElement, postId) {
     postElement.style.position = postElement.style.position || 'relative';
     postElement.appendChild(overlay);
 
+    // populate link list (non-clickable)
+    const links = JSON.parse(postElement.dataset.phishingLinks || '[]') || [];
+    const ul = overlay.querySelector('.detected-links');
+    if (ul) {
+        if (links.length === 0) {
+            ul.innerHTML = '<li>(no external links extracted)</li>';
+        } else {
+            links.forEach(u => {
+                const li = document.createElement('li');
+                try { li.textContent = `${new URL(u).hostname} — ${u}`; } catch (_) { li.textContent = u; }
+                li.style.wordBreak = 'break-all';
+                ul.appendChild(li);
+            });
+        }
+    }
+
+    // Add event listener to the report button (confirm malicious)
+    const reportBtn = overlay.querySelector('.report-phish-button');
+    reportBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        if (!confirm('Report this post as phishing? This will submit the link(s) for training.')) return;
+        try {
+            chrome.runtime.sendMessage({ action: 'reportTruePositive', postId, links }, (res) => {
+                reportBtn.textContent = 'Reported'; reportBtn.disabled = true;
+            });
+        } catch (e) {
+            chrome.runtime.sendMessage({ action: 'reportTruePositive', postId, links: [] }, () => { reportBtn.textContent = 'Reported'; reportBtn.disabled = true; });
+        }
+    });
+
+    // Add event listener to the not-phish button (report false positive)
+    const notBtn = overlay.querySelector('.not-phish-button');
+    notBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        if (!confirm('Mark this post as not malicious (report false positive)?')) return;
+        try {
+            chrome.runtime.sendMessage({ action: 'reportFalsePositive', postId, links }, (res) => {
+                notBtn.textContent = 'Reported'; notBtn.disabled = true;
+            });
+        } catch (e) {
+            chrome.runtime.sendMessage({ action: 'reportFalsePositive', postId, links: [] }, () => { notBtn.textContent = 'Reported'; notBtn.disabled = true; });
+        }
+    });
+
     // Add event listener to the unblur button
     const unblurButton = overlay.querySelector('.unblur-button');
     unblurButton.addEventListener('click', (event) => {
@@ -136,8 +184,15 @@ function blurPost(postElement, postId) {
         addPostUnblurControls(postElement, postId);
     });
 
+    // Toggle details button shows/hides links list
+    const detailsBtn = overlay.querySelector('.view-details-button');
+    detailsBtn.addEventListener('click', () => {
+        const list = overlay.querySelector('.links-list');
+        if (list) list.style.display = (list.style.display === 'none' || !list.style.display) ? 'block' : 'none';
+    });
+
     postElement.dataset.phishingBlurred = 'true';
-    console.log(`Post ${postId} blurred.`);
+    console.log(`Post ${postId} blurred. autoDetected=${!!autoDetected}`);
 }
 
 function addPostUnblurControls(postElement, postId) {

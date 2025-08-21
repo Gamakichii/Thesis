@@ -462,10 +462,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     await addFlaggedLink(link, userId);
                 }
 
-                // Send message back to content script to blur the post
-             chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                // Send message back to content script to blur the post (mark as auto-detected)
+                chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
                     if (tabs[0]) {
-                        chrome.tabs.sendMessage(tabs[0].id, { action: "blurPost", postId: post.id });
+                        chrome.tabs.sendMessage(tabs[0].id, { action: "blurPost", postId: post.id, autoDetected: true });
                     }
                 });
             } else {
