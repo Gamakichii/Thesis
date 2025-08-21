@@ -471,12 +471,32 @@ def report():
     app_id = body.get('app_id')
     rtype = body.get('type')
     payload = body.get('payload') or {}
+    # Ensure payload always contains canonical keys so downstream consumers (notebooks) see them
+    try:
+        payload.setdefault('postId', payload.get('postId') or payload.get('post_id') or None)
+        payload.setdefault('url', payload.get('url') or None)
+    except Exception:
+        payload = payload or {}
     user_id = body.get('userId') or 'anon'
     if not app_id or not rtype:
         return jsonify({'error': 'Missing app_id or type'}), 400
     try:
         col = fs_db.collection(f"artifacts/{app_id}/private_user_reports")
-        col.add({'type': rtype, 'payload': payload, 'userId': user_id, 'timestamp': firestore.SERVER_TIMESTAMP})
+        # Compute label (1=phishing, 0=benign) to make downstream consumers' life easier
+        try:
+            label_val = 1 if rtype in ('true_positive', 'false_negative') else 0
+        except Exception:
+            label_val = None
+        # Persist doc with normalized payload and label
+        col.add({
+            'type': rtype,
+            'payload': payload,
+            'userId': user_id,
+            'url': payload.get('url'),
+            'postId': payload.get('postId'),
+            'label': label_val,
+            'timestamp': firestore.SERVER_TIMESTAMP
+        })
         return jsonify({'status': 'ok'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -499,11 +519,20 @@ def report_bulk():
             app_id = it.get('app_id')
             rtype = it.get('type')
             payload = it.get('payload') or {}
+            try:
+                payload.setdefault('postId', payload.get('postId') or payload.get('post_id') or None)
+                payload.setdefault('url', payload.get('url') or None)
+            except Exception:
+                payload = payload or {}
             user_id = it.get('userId') or 'anon'
             if not app_id or not rtype:
                 continue
             col = fs_db.collection(f"artifacts/{app_id}/private_user_reports")
-            col.add({'type': rtype, 'payload': payload, 'userId': user_id, 'timestamp': firestore.SERVER_TIMESTAMP})
+            try:
+                label_val = 1 if rtype in ('true_positive', 'false_negative') else 0
+            except Exception:
+                label_val = None
+            col.add({'type': rtype, 'payload': payload, 'userId': user_id, 'url': payload.get('url'), 'postId': payload.get('postId'), 'label': label_val, 'timestamp': firestore.SERVER_TIMESTAMP})
             written += 1
         return jsonify({'status': 'ok', 'written': written})
     except Exception as e:
@@ -609,6 +638,37 @@ def model_info():
         'models_last_loaded_at': models_last_loaded_at,
     }
     return jsonify(info)
+
+
+@app.route('/debug/recent_reports', methods=['GET'])
+def debug_recent_reports():
+    """Return recent user reports and a small summary (counts per type/label).
+    For safety this endpoint should be restricted in production; currently available for local debugging only.
+    Query params: ?limit=50
+    """
+    if not _fs_ok():
+        return jsonify({'error': 'Firestore not configured on server'}), 500
+    try:
+        limit = int(request.args.get('limit', '50'))
+    except Exception:
+        limit = 50
+    try:
+        col = fs_db.collection(f"artifacts/ads-phishing-link/private_user_reports")
+        docs = list(col.order_by('timestamp', direction=firestore.Query.DESCENDING).limit(limit).stream())
+        items = []
+        counts_by_type = {}
+        counts_by_label = { '0': 0, '1': 0, 'null': 0 }
+        for d in docs:
+            dd = d.to_dict()
+            rtype = dd.get('type')
+            payload = dd.get('payload') or {}
+            label = dd.get('label') if 'label' in dd else (1 if rtype in ('true_positive', 'false_negative') else 0)
+            counts_by_type[rtype] = counts_by_type.get(rtype, 0) + 1
+            counts_by_label[str(label) if label is not None else 'null'] = counts_by_label.get(str(label), 0) + 1
+            items.append({ 'id': d.id, 'type': rtype, 'label': label, 'url': dd.get('url') or payload.get('url'), 'postId': dd.get('postId') or payload.get('postId'), 'payload': payload, 'ts': dd.get('timestamp') })
+        return jsonify({ 'count': len(items), 'by_type': counts_by_type, 'by_label': counts_by_label, 'items': items })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/flag', methods=['POST'])
 def flag():

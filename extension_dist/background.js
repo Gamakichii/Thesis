@@ -140,10 +140,18 @@ async function addUserReport(type, payload) {
     const collectionRef = getUserReportsCollectionRef();
     if (!collectionRef) return false;
     try {
+        // Normalize payload and compute label client-side so Firestore entries are consistent
+        const normalized = Object.assign({}, payload || {});
+        normalized.postId = normalized.postId || normalized.post_id || null;
+        normalized.url = normalized.url || (Array.isArray(normalized.links) && normalized.links.length ? normalized.links[0] : normalized.url) || null;
+        const label = (type === 'true_positive' || type === 'false_negative') ? 1 : 0;
         await addDoc(collectionRef, {
             type,
-            payload,
+            payload: normalized,
             userId: userId || 'anon',
+            url: normalized.url,
+            postId: normalized.postId,
+            label: label,
             timestamp: new Date()
         });
         return true;
@@ -495,10 +503,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         (async () => {
             try {
                 const links = Array.isArray(request.links) ? request.links : [];
+                // Prefer a primary url in payload for training; use first link if available
+                const primaryUrl = (links && links.length) ? links[0] : (request.url || null);
                 if (request.postId) {
                     await ensureGraphNodeForReport(request.postId, links);
                 }
-                const payload = { postId: request.postId, links };
+                const payload = { postId: request.postId, links, url: primaryUrl };
                 await addUserReport('false_positive', payload);
                 await serverReport('false_positive', payload);
                 sendResponse({ status: 'reported' });
@@ -537,8 +547,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         (async () => {
             try {
                 const links = Array.isArray(request.links) ? request.links : [];
+                const primaryUrl = (links && links.length) ? links[0] : (request.url || null);
                 await ensureGraphNodeForReport(request.postId, links);
-                const payload = { postId: request.postId, links, source: 'manual' };
+                const payload = { postId: request.postId, links, url: primaryUrl, source: 'manual' };
                 await addUserReport('true_positive', payload);
                 await serverReport('true_positive', payload);
                 // Also store under flagged links (public)
@@ -563,8 +574,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         (async () => {
             try {
                 const links = Array.isArray(request.links) ? request.links : [];
+                const primaryUrl = (links && links.length) ? links[0] : (request.url || null);
                 await ensureGraphNodeForReport(request.postId, links);
-                const payload = { postId: request.postId, links, source: 'manual' };
+                const payload = { postId: request.postId, links, url: primaryUrl, source: 'manual' };
                 await addUserReport('true_negative', payload);
                 await serverReport('true_negative', payload);
                 sendResponse({ status: 'ok' });
