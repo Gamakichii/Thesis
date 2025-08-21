@@ -295,10 +295,30 @@ def _compute_lexical_subset(url: str) -> dict:
 
 def extract_features_for_urls(urls):
     """Return DataFrame with columns matching scaler.feature_names_in_. Missing features are filled with scaler.mean_."""
+    # Prefer explicit feature names saved with the scaler
     expected_cols = list(getattr(scaler, 'feature_names_in_', []))
+    # If scaler lacks feature_names_in_ (older pickle / sklearn mismatch),
+    # fall back to the legacy lexical feature list used by the pre-train notebook.
     if not expected_cols:
-        # Fallback to 111 dims
-        expected_cols = [f"f{i}" for i in range(111)]
+        # Use the exact lexical feature list from the updated pre-train notebook
+        expected_cols = [
+            'qty_dot_url', 'qty_hyphen_url', 'qty_underline_url', 'qty_slash_url', 
+            'qty_questionmark_url', 'qty_equal_url', 'qty_at_url', 'qty_and_url', 
+            'qty_exclamation_url', 'qty_space_url', 'qty_tilde_url', 'qty_comma_url', 
+            'qty_plus_url', 'qty_asterisk_url', 'qty_hashtag_url', 'qty_dollar_url', 
+            'qty_percent_url', 'qty_dot_domain', 'qty_hyphen_domain', 'qty_underline_domain', 
+            'qty_at_domain', 'qty_vowels_domain', 'domain_length', 'domain_in_ip', 
+            'server_client_domain'
+        ]
+        # If scaler knows the expected number of features, and it differs from
+        # the legacy list length, try to honor scaler.n_features_in_ by padding
+        n_in = getattr(scaler, 'n_features_in_', None)
+        if isinstance(n_in, int) and n_in != len(expected_cols):
+            # If scaler expects fewer dims, truncate; if more, pad with generic names
+            if n_in < len(expected_cols):
+                expected_cols = expected_cols[:n_in]
+            else:
+                expected_cols = expected_cols + [f"f{i}" for i in range(len(expected_cols), n_in)]
     base_means = getattr(scaler, 'mean_', np.zeros(len(expected_cols)))
 
     rows = []

@@ -150,6 +150,21 @@ function blurPost(postElement, postId, autoDetected = false) {
         try {
             chrome.runtime.sendMessage({ action: 'reportTruePositive', postId, links }, (res) => {
                 reportBtn.textContent = 'Reported'; reportBtn.disabled = true;
+                // Remove the "not malicious" control since user confirmed it's phishing
+                const np = overlay.querySelector('.not-phish-button');
+                if (np) np.remove();
+                // Show inline confirmation and change overlay controls to show limited options
+                showInlineNotification(postElement, 'Reported as phishing');
+                // Update overlay buttons: keep Reported, View Post Anyway, Show link details
+                try {
+                    const unblurBtn = overlay.querySelector('.unblur-button');
+                    const detailsBtn = overlay.querySelector('.view-details-button');
+                    // Remove any remaining non-essential buttons
+                    const nonEssential = overlay.querySelectorAll('.post-nonessential');
+                    nonEssential.forEach(n => n.remove());
+                    // Ensure the Reported button stays, and replace Not-Phish is removed
+                    // (UI already updated above)
+                } catch (e) {}
             });
         } catch (e) {
             chrome.runtime.sendMessage({ action: 'reportTruePositive', postId, links: [] }, () => { reportBtn.textContent = 'Reported'; reportBtn.disabled = true; });
@@ -160,13 +175,31 @@ function blurPost(postElement, postId, autoDetected = false) {
     const notBtn = overlay.querySelector('.not-phish-button');
     notBtn.addEventListener('click', (ev) => {
         ev.stopPropagation();
+        // User marks as safe: report and automatically unblur/view the post
         if (!confirm('Mark this post as not malicious (report false positive)?')) return;
         try {
             chrome.runtime.sendMessage({ action: 'reportFalsePositive', postId, links }, (res) => {
-                notBtn.textContent = 'Reported'; notBtn.disabled = true;
+                // Show inline notification and unblur so the user can view
+                showInlineNotification(postElement, 'Reported as safe — post unblurred');
+                childrenToBlur.forEach((child) => {
+                    child.style.filter = '';
+                    child.style.pointerEvents = '';
+                });
+                overlay.remove();
+                postElement.dataset.phishingBlurred = 'false';
+                addPostUnblurControls(postElement, postId);
             });
         } catch (e) {
-            chrome.runtime.sendMessage({ action: 'reportFalsePositive', postId, links: [] }, () => { notBtn.textContent = 'Reported'; notBtn.disabled = true; });
+            chrome.runtime.sendMessage({ action: 'reportFalsePositive', postId, links: [] }, () => {
+                showInlineNotification(postElement, 'Reported as safe — post unblurred');
+                childrenToBlur.forEach((child) => {
+                    child.style.filter = '';
+                    child.style.pointerEvents = '';
+                });
+                overlay.remove();
+                postElement.dataset.phishingBlurred = 'false';
+                addPostUnblurControls(postElement, postId);
+            });
         }
     });
 
@@ -193,6 +226,31 @@ function blurPost(postElement, postId, autoDetected = false) {
 
     postElement.dataset.phishingBlurred = 'true';
     console.log(`Post ${postId} blurred. autoDetected=${!!autoDetected}`);
+}
+
+// Small inline notification attached to a post (shows for a few seconds)
+function showInlineNotification(postElement, message, timeout = 3000) {
+    try {
+        const note = document.createElement('div');
+        note.className = 'dakugumen-inline-notice';
+        note.style.cssText = `
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            z-index: 10001;
+            background: rgba(0,0,0,0.8);
+            color: #fff;
+            padding: 6px 10px;
+            border-radius: 8px;
+            font-size: 13px;
+            max-width: 80%;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+        `;
+        note.textContent = message;
+        postElement.style.position = postElement.style.position || 'relative';
+        postElement.appendChild(note);
+        setTimeout(() => { try { note.remove(); } catch (_) {} }, timeout);
+    } catch (e) { console.warn('showInlineNotification failed', e); }
 }
 
 function addPostUnblurControls(postElement, postId) {
