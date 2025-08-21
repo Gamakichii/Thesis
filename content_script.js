@@ -345,7 +345,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // Find the post element by its ID and blur it
         const postElement = document.querySelector(`[data-phishing-post-id="${request.postId}"]`);
         if (postElement) {
-            blurPost(postElement, request.postId);
+            // pass autoDetected flag through if present
+            blurPost(postElement, request.postId, !!request.autoDetected);
             sendResponse({ status: "blurred", postId: request.postId });
         } else {
             console.warn(`Content script: Could not find post with ID ${request.postId} to blur.`);
@@ -355,7 +356,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     } else if (request.action === 'reblurPost') {
         const postElement = document.querySelector(`[data-phishing-post-id="${request.postId}"]`);
         if (postElement) {
-            blurPost(postElement, request.postId);
+            blurPost(postElement, request.postId, !!request.autoDetected);
             sendResponse({ status: 'reblurred', postId: request.postId });
         } else {
             sendResponse({ status: 'not_found', postId: request.postId });
