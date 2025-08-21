@@ -13,6 +13,7 @@ import os
 import collections
 from dotenv import load_dotenv
 from google.oauth2 import service_account
+from datetime import datetime, timedelta
 from google.cloud import firestore
 
 # --- Define the base directory for model artifacts ---
@@ -463,6 +464,85 @@ def report_bulk():
             col = fs_db.collection(f"artifacts/{app_id}/private_user_reports")
             col.add({'type': rtype, 'payload': payload, 'userId': user_id, 'timestamp': firestore.SERVER_TIMESTAMP})
             written += 1
+        return jsonify({'status': 'ok', 'written': written})
+    except Exception as e:
+        return jsonify({'error': str(e), 'written': written}), 500
+
+
+@app.route('/review_queue', methods=['POST'])
+def review_queue():
+    """Accept a single review item or batch and store to Firestore under artifacts/{app_id}/review_queue"""
+    if not _fs_ok():
+        return jsonify({'error': 'Firestore not configured on server'}), 500
+    data = request.get_json() or {}
+    items = []
+    # Accept either single dict or list under 'items'
+    if isinstance(data, dict) and data.get('items'):
+        items = data.get('items')
+    elif isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = [data]
+
+    written = 0
+    try:
+        for it in items:
+            app_id = it.get('app_id') or it.get('appId') or (it.get('app_id') or it.get('appId'))
+            payload = it.get('payload') or it
+            user_id = it.get('userId') or it.get('user_id') or 'anon'
+            if not app_id:
+                continue
+            # Build a dedupe key from postId and url if present
+            postId = None
+            url = None
+            try:
+                postId = payload.get('postId') or payload.get('post_id')
+            except Exception:
+                postId = None
+            try:
+                url = payload.get('url')
+            except Exception:
+                url = None
+
+            # Compute document id hash to dedupe
+            import hashlib
+            key_parts = [str(app_id)]
+            if postId is not None:
+                key_parts.append(str(postId))
+            if url is not None:
+                key_parts.append(str(url))
+            doc_key_raw = '|'.join(key_parts)
+            doc_id = hashlib.sha256(doc_key_raw.encode('utf-8')).hexdigest()
+
+            col = fs_db.collection(f"artifacts/{app_id}/review_queue")
+            doc_ref = col.document(doc_id)
+            try:
+                existing = doc_ref.get()
+                if existing.exists:
+                    # Already queued; skip to avoid duplicates
+                    continue
+                else:
+                    # optional TTL: set expires_at if REVIEW_TTL_DAYS configured
+                    expires_days = int(os.environ.get('REVIEW_TTL_DAYS', '0') or '0')
+                    expires_at = None
+                    if expires_days > 0:
+                        expires_at = datetime.utcnow() + timedelta(days=expires_days)
+                    payload_doc = {'payload': payload, 'userId': user_id, 'timestamp': firestore.SERVER_TIMESTAMP, 'processed': False}
+                    if expires_at is not None:
+                        payload_doc['expires_at'] = expires_at
+                    doc_ref.set(payload_doc)
+                    written += 1
+            except Exception:
+                # Fallback to add if document operations fail
+                add_doc = {'payload': payload, 'userId': user_id, 'timestamp': firestore.SERVER_TIMESTAMP, 'processed': False}
+                try:
+                    expires_days = int(os.environ.get('REVIEW_TTL_DAYS', '0') or '0')
+                    if expires_days > 0:
+                        add_doc['expires_at'] = datetime.utcnow() + timedelta(days=expires_days)
+                except Exception:
+                    pass
+                col.add(add_doc)
+                written += 1
         return jsonify({'status': 'ok', 'written': written})
     except Exception as e:
         return jsonify({'error': str(e), 'written': written}), 500

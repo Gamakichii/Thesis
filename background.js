@@ -232,6 +232,14 @@ const REPORT_QUEUE = [];
 const REPORT_BATCH_SIZE = 10; // flush when this many collected
 const REPORT_FLUSH_MS = 30 * 1000; // flush every 30s
 const REPORT_STORAGE_KEY = 'dakugumen_report_queue';
+// Review queue for borderline posts
+const REVIEW_QUEUE = [];
+const REVIEW_BATCH_SIZE = 10;
+const REVIEW_FLUSH_MS = 30 * 1000;
+const REVIEW_STORAGE_KEY = 'dakugumen_review_queue';
+// default thresholds (can be overridden in extension settings via chrome.storage)
+let REVIEW_MIN = 0.45;
+let REVIEW_MAX = 0.60;
 
 function saveReportQueueToStorage() {
     try {
@@ -263,6 +271,36 @@ function loadReportQueueFromStorage() {
         }
     } catch (e) {
         console.warn('loadReportQueueFromStorage failed', e);
+    }
+}
+
+function saveReviewQueueToStorage() {
+    try {
+        if (chrome && chrome.storage && chrome.storage.local) {
+            chrome.storage.local.set({ [REVIEW_STORAGE_KEY]: REVIEW_QUEUE }, () => {});
+        }
+    } catch (e) {
+        console.warn('saveReviewQueueToStorage failed', e);
+    }
+}
+
+function loadReviewQueueFromStorage() {
+    try {
+        if (chrome && chrome.storage && chrome.storage.local) {
+            chrome.storage.local.get([REVIEW_STORAGE_KEY], (res) => {
+                try {
+                    const items = (res && res[REVIEW_STORAGE_KEY]) || [];
+                    if (Array.isArray(items) && items.length > 0) {
+                        for (const it of items) {
+                            REVIEW_QUEUE.push(it);
+                        }
+                        console.log(`Loaded ${items.length} queued review items from storage`);
+                    }
+                } catch (e) { console.warn('Error reading stored review queue', e); }
+            });
+        }
+    } catch (e) {
+        console.warn('loadReviewQueueFromStorage failed', e);
     }
 }
 
@@ -305,10 +343,33 @@ async function flushReportQueue() {
     }
 }
 
+async function flushReviewQueue() {
+    if (REVIEW_QUEUE.length === 0) return;
+    const batch = REVIEW_QUEUE.slice(0, REVIEW_BATCH_SIZE);
+    try {
+        const res = await fetch(`${API_BASE_URL}/review_queue`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(batch)
+        });
+        if (!res.ok) {
+            const txt = await res.text();
+            console.warn('review_queue returned non-ok:', res.status, txt);
+            return;
+        }
+        REVIEW_QUEUE.splice(0, batch.length);
+        console.log(`Flushed ${batch.length} review items to server. Remaining review queue: ${REVIEW_QUEUE.length}`);
+        saveReviewQueueToStorage();
+    } catch (e) {
+        console.warn('flushReviewQueue failed', e);
+    }
+}
+
 // Periodic flush
 setInterval(() => { try { flushReportQueue(); } catch (e) { console.warn('periodic flush failed', e); } }, REPORT_FLUSH_MS);
-// Load persisted queue on startup
+setInterval(() => { try { flushReportQueue(); } catch (e) { console.warn('periodic flush failed', e); } }, REPORT_FLUSH_MS);
+setInterval(() => { try { flushReviewQueue(); } catch (e) { console.warn('periodic review flush failed', e); } }, REVIEW_FLUSH_MS);
+// Load persisted queues on startup
 try { loadReportQueueFromStorage(); } catch (e) { console.warn('initial queue load failed', e); }
+try { loadReviewQueueFromStorage(); } catch (e) { console.warn('initial review queue load failed', e); }
 
 // Backwards-compatible alias used throughout the code
 async function serverReport(rtype, payload) {
@@ -352,10 +413,11 @@ async function getMLPrediction(postText, postLinks, postId) {
         });
         if (!response.ok) throw new Error(`batch status ${response.status}`);
         const data = await response.json();
-        const flagged = (data.predictions || []).filter(p => p.is_phishing).map(p => p.url);
+        const preds = (data.predictions || []);
+        const flagged = preds.filter(p => p.is_phishing).map(p => p.url);
         // Update cache for each url
-        (data.predictions || []).forEach(p => setCachedPrediction(String(p.url || '').toLowerCase(), { is_phishing: !!p.is_phishing }));
-        return { isPhishing: flagged.length > 0, flaggedLinks: flagged };
+        preds.forEach(p => setCachedPrediction(String(p.url || '').toLowerCase(), { is_phishing: !!p.is_phishing }));
+        return { isPhishing: flagged.length > 0, flaggedLinks: flagged, predictions: preds };
     } catch (e) {
         console.warn('Batch prediction failed, falling back per-link', e);
         const results = await Promise.all(postLinks.map(async (link) => ({ link, res: await getBackendPredictionForLink(link, postId) })));
@@ -392,6 +454,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         console.log("Background script: Received posts for analysis:", request.posts.length);
         request.posts.forEach(async (post) => {
             const prediction = await getMLPrediction(post.text, post.links, post.id);
+            const preds = prediction.predictions || [];
             if (prediction.isPhishing) {
                 console.warn(`Phishing detected in post ${post.id}! Links: ${post.links.join(', ')}`);
                 // Store the flagged link in Firestore
@@ -413,6 +476,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     }
                 });
             }
+            // Enqueue borderline predictions for review
+            try {
+                for (const p of preds) {
+                    const score = p.final_score || 0;
+                    if (score >= REVIEW_MIN && score <= REVIEW_MAX) {
+                        REVIEW_QUEUE.push({ app_id: appId, payload: { postId: post.id, url: p.url, final_score: score }, userId: userId });
+                    }
+                }
+                if (REVIEW_QUEUE.length >= REVIEW_BATCH_SIZE) flushReviewQueue();
+                saveReviewQueueToStorage();
+            } catch (e) { console.warn('enqueue review failed', e); }
         });
         sendResponse({ status: "processing" }); // Acknowledge receipt
         return true;
