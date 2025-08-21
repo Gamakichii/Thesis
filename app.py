@@ -112,6 +112,27 @@ def load_models():
         else:
             print("⚠️ GNN artifacts not found, continuing without them.")
 
+        # Load fusion configuration if present (preferred over env defaults)
+        fusion_path = os.path.join(HERE, "fusion_config.json")
+        if os.path.exists(fusion_path):
+            try:
+                with open(fusion_path, "r") as f:
+                    cfg = json.load(f)
+                # Allow notebook-produced config to set AE threshold and AE weight
+                if cfg.get('ae_threshold') is not None:
+                    try:
+                        autoencoder_threshold = float(cfg.get('ae_threshold'))
+                        print("✅ Loaded ae_threshold from fusion_config.json")
+                    except Exception:
+                        print("⚠️ Invalid ae_threshold in fusion_config.json; ignoring")
+                if cfg.get('fusion_weight_ae') is not None:
+                    # set AE_WEIGHT env var default if not already set
+                    os.environ.setdefault('AE_WEIGHT', str(cfg.get('fusion_weight_ae')))
+                    print("✅ Loaded fusion_weight_ae from fusion_config.json into AE_WEIGHT env var")
+                print("✅ Loaded fusion_config.json")
+            except Exception as e:
+                print("⚠️ Failed to load fusion_config.json:", e)
+
         # Load optional supervised classifier if present
         clf_path = os.path.join(HERE, 'phishing_classifier.pkl')
         meta_path = os.path.join(HERE, 'classifier_meta.json')
@@ -178,6 +199,8 @@ def _compute_lexical_subset(url: str) -> dict:
     except Exception:
         u = url or ""
     parts = tldextract.extract(u)
+    # Known shortener domains (used to decide whether to attempt resolution)
+    shorteners = {"bit.ly","tinyurl.com","t.co","goo.gl","ow.ly","is.gd","cutt.ly","lnkd.in","buff.ly"}
     # If URL is a known shortener, optionally resolve to the final destination to extract better features
     short_domain = (parts.domain + ('.' + parts.suffix if parts.suffix else '')).lower()
     resolve_short = os.environ.get('RESOLVE_SHORTENERS', '1') in ('1', 'true', 'yes')
@@ -220,8 +243,6 @@ def _compute_lexical_subset(url: str) -> dict:
                 pass
     domain = ".".join([p for p in [parts.subdomain, parts.domain, parts.suffix] if p])
     path_q = u.split(domain, 1)[-1] if domain and domain in u else ""
-    shorteners = {"bit.ly","tinyurl.com","t.co","goo.gl","ow.ly","is.gd","cutt.ly","lnkd.in","buff.ly"}
-
     feats = {
         "qty_dot_url": u.count("."),
         "qty_hyphen_url": u.count("-"),
