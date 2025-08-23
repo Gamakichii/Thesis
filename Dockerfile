@@ -19,11 +19,12 @@ RUN pip install --no-cache-dir -r requirements.txt gunicorn
 # Copy the application code
 COPY . .
 
-# Preload models at build time (optional: can skip if heavy)
-RUN python preload_models.py || echo "Preload failed, continuing."
-
 # Expose port
 EXPOSE 8080
 
-# Startup command
-CMD ["./startup.sh"]
+# Ensure unbuffered logs
+ENV PYTHONUNBUFFERED=1
+
+# Start Gunicorn directly (no startup.sh needed)
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers=1", "--timeout=600", "--access-logfile=-", "--error-logfile=-", "app:app"]
+
