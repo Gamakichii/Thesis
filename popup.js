@@ -2,6 +2,8 @@
 const scanButton = document.getElementById('scanButton');
 const viewFlaggedButton = document.getElementById('viewFlaggedButton');
 const statusDiv = document.getElementById('status');
+const reportFnButton = document.getElementById('reportFnButton');
+const fnUrlInput = document.getElementById('fnUrl');
 const userIdDisplay = document.getElementById('userIdDisplay');
 
 // Function to update the status message in the popup
@@ -130,8 +132,6 @@ viewFlaggedButton.addEventListener('click', () => {
         }
     });
 });
-<<<<<<< Updated upstream
-=======
 
 // Event listener for reporting a false negative
 if (reportFnButton && fnUrlInput) {
@@ -214,4 +214,3 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 });
->>>>>>> Stashed changes
