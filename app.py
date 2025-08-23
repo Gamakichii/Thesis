@@ -7,9 +7,13 @@ import tensorflow as tf
 import re
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 import tldextract
+import requests
 import json
 import os
+import collections
+from dotenv import load_dotenv
 from google.oauth2 import service_account
+from datetime import datetime, timedelta
 from google.cloud import firestore
 
 # --- Define the base directory for model artifacts ---
@@ -20,7 +24,7 @@ app = Flask(__name__)
 CORS(app, origins=["*"])  # Allow all origins for Chrome extension
 
 # Azure Container App will inject PORT
-PORT = int(os.environ.get("PORT", 8000))
+PORT = int(os.environ.get("PORT", 8080))
 
 # --- Model Loading ---
 MODEL_LOAD_ERROR = None
@@ -31,6 +35,13 @@ effective_autoencoder_threshold = None
 gnn_probs = None
 post_node_map = None
 models_last_loaded_at = None
+classifier = None
+classifier_meta = None
+
+# Simple LRU cache for resolved shorteners
+RESOLVED_SHORTENER_CACHE = {}
+RESOLVED_SHORTENER_ORDER = collections.deque()
+RESOLVED_SHORTENER_MAX = int(os.environ.get('SHORTENER_CACHE_MAX', '1024'))
 
 
 def load_models():
@@ -46,6 +57,11 @@ def load_models():
     gnn_probs = None
     post_node_map = None
     try:
+        # Load .env if present so env vars can be configured via file
+        try:
+            load_dotenv(os.path.join(HERE, '.env'))
+        except Exception:
+            pass
         # Load Autoencoder model (.keras)
         model_path = os.path.join(HERE, "phishing_autoencoder_model.keras")
         try:
@@ -95,6 +111,42 @@ def load_models():
             print("✅ Loaded real-graph GCN artifacts.")
         else:
             print("⚠️ GNN artifacts not found, continuing without them.")
+
+        # Load fusion configuration if present (preferred over env defaults)
+        fusion_path = os.path.join(HERE, "fusion_config.json")
+        if os.path.exists(fusion_path):
+            try:
+                with open(fusion_path, "r") as f:
+                    cfg = json.load(f)
+                # Allow notebook-produced config to set AE threshold and AE weight
+                if cfg.get('ae_threshold') is not None:
+                    try:
+                        autoencoder_threshold = float(cfg.get('ae_threshold'))
+                        print("✅ Loaded ae_threshold from fusion_config.json")
+                    except Exception:
+                        print("⚠️ Invalid ae_threshold in fusion_config.json; ignoring")
+                if cfg.get('fusion_weight_ae') is not None:
+                    # set AE_WEIGHT env var default if not already set
+                    os.environ.setdefault('AE_WEIGHT', str(cfg.get('fusion_weight_ae')))
+                    print("✅ Loaded fusion_weight_ae from fusion_config.json into AE_WEIGHT env var")
+                print("✅ Loaded fusion_config.json")
+            except Exception as e:
+                print("⚠️ Failed to load fusion_config.json:", e)
+
+        # Load optional supervised classifier if present
+        clf_path = os.path.join(HERE, 'phishing_classifier.pkl')
+        meta_path = os.path.join(HERE, 'classifier_meta.json')
+        try:
+            if os.path.exists(clf_path) and os.path.exists(meta_path):
+                with open(clf_path, 'rb') as f:
+                    classifier = pickle.load(f)
+                with open(meta_path, 'r') as f:
+                    classifier_meta = json.load(f)
+                print('✅ Loaded supervised classifier and meta.')
+            else:
+                print('No supervised classifier artifact found.')
+        except Exception as e:
+            print('Error loading classifier artifact:', e)
 
         models_last_loaded_at = __import__('datetime').datetime.utcnow().isoformat() + 'Z'
 
@@ -147,10 +199,50 @@ def _compute_lexical_subset(url: str) -> dict:
     except Exception:
         u = url or ""
     parts = tldextract.extract(u)
+    # Known shortener domains (used to decide whether to attempt resolution)
+    shorteners = {"bit.ly","tinyurl.com","t.co","goo.gl","ow.ly","is.gd","cutt.ly","lnkd.in","buff.ly"}
+    # If URL is a known shortener, optionally resolve to the final destination to extract better features
+    short_domain = (parts.domain + ('.' + parts.suffix if parts.suffix else '')).lower()
+    resolve_short = os.environ.get('RESOLVE_SHORTENERS', '1') in ('1', 'true', 'yes')
+    if resolve_short and short_domain in shorteners:
+        final_url = None
+        try:
+            # Use LRU cache to avoid repeated network calls
+            if u in RESOLVED_SHORTENER_CACHE:
+                final_url = RESOLVED_SHORTENER_CACHE[u]
+            else:
+                try:
+                    r = requests.head(u, allow_redirects=True, timeout=3)
+                    final_url = r.url if r and getattr(r, 'url', None) else u
+                except Exception:
+                    try:
+                        r = requests.get(u, allow_redirects=True, timeout=5)
+                        final_url = r.url if r and getattr(r, 'url', None) else u
+                    except Exception:
+                        final_url = u
+                # update LRU cache
+                try:
+                    RESOLVED_SHORTENER_CACHE[u] = final_url
+                    RESOLVED_SHORTENER_ORDER.append(u)
+                    if len(RESOLVED_SHORTENER_ORDER) > RESOLVED_SHORTENER_MAX:
+                        old = RESOLVED_SHORTENER_ORDER.popleft()
+                        RESOLVED_SHORTENER_CACHE.pop(old, None)
+                except Exception:
+                    pass
+        except Exception:
+            final_url = u
+
+        # Replace u and recompute parts for final URL if resolution changed
+        if final_url and final_url != u:
+            try:
+                u = final_url
+                parts = tldextract.extract(u)
+                domain = ".".join([p for p in [parts.subdomain, parts.domain, parts.suffix] if p])
+                path_q = u.split(domain, 1)[-1] if domain and domain in u else ""
+            except Exception:
+                pass
     domain = ".".join([p for p in [parts.subdomain, parts.domain, parts.suffix] if p])
     path_q = u.split(domain, 1)[-1] if domain and domain in u else ""
-    shorteners = {"bit.ly","tinyurl.com","t.co","goo.gl","ow.ly","is.gd","cutt.ly","lnkd.in","buff.ly"}
-
     feats = {
         "qty_dot_url": u.count("."),
         "qty_hyphen_url": u.count("-"),
@@ -203,10 +295,30 @@ def _compute_lexical_subset(url: str) -> dict:
 
 def extract_features_for_urls(urls):
     """Return DataFrame with columns matching scaler.feature_names_in_. Missing features are filled with scaler.mean_."""
+    # Prefer explicit feature names saved with the scaler
     expected_cols = list(getattr(scaler, 'feature_names_in_', []))
+    # If scaler lacks feature_names_in_ (older pickle / sklearn mismatch),
+    # fall back to the legacy lexical feature list used by the pre-train notebook.
     if not expected_cols:
-        # Fallback to 111 dims
-        expected_cols = [f"f{i}" for i in range(111)]
+        # Use the exact lexical feature list from the updated pre-train notebook
+        expected_cols = [
+            'qty_dot_url', 'qty_hyphen_url', 'qty_underline_url', 'qty_slash_url', 
+            'qty_questionmark_url', 'qty_equal_url', 'qty_at_url', 'qty_and_url', 
+            'qty_exclamation_url', 'qty_space_url', 'qty_tilde_url', 'qty_comma_url', 
+            'qty_plus_url', 'qty_asterisk_url', 'qty_hashtag_url', 'qty_dollar_url', 
+            'qty_percent_url', 'qty_dot_domain', 'qty_hyphen_domain', 'qty_underline_domain', 
+            'qty_at_domain', 'qty_vowels_domain', 'domain_length', 'domain_in_ip', 
+            'server_client_domain'
+        ]
+        # If scaler knows the expected number of features, and it differs from
+        # the legacy list length, try to honor scaler.n_features_in_ by padding
+        n_in = getattr(scaler, 'n_features_in_', None)
+        if isinstance(n_in, int) and n_in != len(expected_cols):
+            # If scaler expects fewer dims, truncate; if more, pad with generic names
+            if n_in < len(expected_cols):
+                expected_cols = expected_cols[:n_in]
+            else:
+                expected_cols = expected_cols + [f"f{i}" for i in range(len(expected_cols), n_in)]
     base_means = getattr(scaler, 'mean_', np.zeros(len(expected_cols)))
 
     rows = []
@@ -262,15 +374,32 @@ def predict():
             if idx is not None and 0 <= idx < len(gnn_probs):
                 structural_score = float(gnn_probs[idx])
 
-        # 3. Fuse Scores
-        final_score = float((content_score * 0.6) + (structural_score * 0.4))
+        # 3. Fuse Scores (AE weight configurable via AE_WEIGHT env var)
+        try:
+            ae_weight = float(os.environ.get('AE_WEIGHT', '0.6'))
+        except Exception:
+            ae_weight = 0.6
+        final_score = float((content_score * ae_weight) + (structural_score * (1.0 - ae_weight)))
         decision_cutoff = float(os.environ.get('FINAL_SCORE_CUTOFF', '0.5'))
         is_phishing = bool(final_score > decision_cutoff)
         
         used_gcn = bool(post_node_map is not None and gnn_probs is not None)
+        # 4. Optional supervised classifier override/score
+        classifier_prob = None
+        try:
+            if classifier is not None and classifier_meta is not None:
+                # Build classifier feature vector: [content_score, gcn_prob] + scaled_features
+                gcn_p = structural_score
+                clf_vec = np.concatenate(([content_score, gcn_p], scaled_features[0])).reshape(1, -1)
+                classifier_prob = float(classifier.predict_proba(clf_vec)[0,1])
+                # If classifier strongly predicts phishing, bump final score
+                if classifier_prob > float(os.environ.get('CLASSIFIER_OVERRIDE_THRESHOLD', '0.75')):
+                    final_score = max(final_score, classifier_prob)
+        except Exception as e:
+            print('Classifier scoring failed:', e)
         # Detailed log for debugging
         print(f"URL: {url} | recon_error={error:.6f} content={content_score:.3f} gcn={structural_score:.3f} final={final_score:.3f} | phishing={is_phishing} gcn_used={used_gcn}")
-        return jsonify({'is_phishing': is_phishing, 'used_gcn': used_gcn, 'final_score': final_score, 'reconstruction_error': error, 'content_score': content_score, 'ae_threshold_used': thr})
+        return jsonify({'is_phishing': is_phishing, 'used_gcn': used_gcn, 'final_score': final_score, 'reconstruction_error': error, 'content_score': content_score, 'ae_threshold_used': thr, 'ae_weight': ae_weight, 'final_score_cutoff': decision_cutoff, 'classifier_prob': classifier_prob})
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -294,7 +423,9 @@ def predict_batch():
         scaled = scaler.transform(feats)
         recon = autoencoder_model.predict(scaled, verbose=0)
         errors = np.mean(np.square(scaled - recon), axis=1)
-        content_scores = np.minimum(errors / (autoencoder_threshold * 2), 1.0)
+        # Use effective threshold if available
+        thr = effective_autoencoder_threshold if effective_autoencoder_threshold is not None else autoencoder_threshold
+        content_scores = np.minimum(errors / (thr * 2), 1.0)
 
         # 2. Structural Scores from artifacts (or 0.5 if unavailable)
         if post_node_map is not None and gnn_probs is not None:
@@ -306,10 +437,12 @@ def predict_batch():
         else:
             structural_scores = np.full(len(post_ids), 0.5, dtype=float)
 
-        # 3. Fuse Scores
-        # Use effective threshold for content_score scaling
-        thr = effective_autoencoder_threshold if effective_autoencoder_threshold is not None else autoencoder_threshold
-        final_scores = (0.6 * content_scores) + (0.4 * structural_scores)
+        # 3. Fuse Scores (configurable AE weight)
+        try:
+            ae_weight = float(os.environ.get('AE_WEIGHT', '0.6'))
+        except Exception:
+            ae_weight = 0.6
+        final_scores = (ae_weight * content_scores) + ((1.0 - ae_weight) * structural_scores)
         decision_cutoff = float(os.environ.get('FINAL_SCORE_CUTOFF', '0.5'))
         preds = (final_scores > decision_cutoff).tolist()
 
@@ -319,7 +452,7 @@ def predict_batch():
             print(f"BATCH URL: {u} | recon_error={float(err):.6f} content={float(csc):.3f} gcn={float(gsc):.3f} final={float(fin):.3f} | phishing={bool(pr)}")
 
         return jsonify({'predictions': [
-            { 'url': url, 'post_id': pid, 'is_phishing': bool(pred), 'used_gcn': used_gcn, 'reconstruction_error': float(err), 'content_score': float(csc), 'final_score': float(fin), 'ae_threshold_used': thr }
+            { 'url': url, 'post_id': pid, 'is_phishing': bool(pred), 'used_gcn': used_gcn, 'reconstruction_error': float(err), 'content_score': float(csc), 'final_score': float(fin), 'ae_threshold_used': thr, 'ae_weight': ae_weight, 'final_score_cutoff': decision_cutoff }
             for url, pid, pred, err, csc, fin in zip(urls, post_ids, preds, errors.tolist(), content_scores.tolist(), final_scores.tolist())
         ]})
 
@@ -338,15 +471,151 @@ def report():
     app_id = body.get('app_id')
     rtype = body.get('type')
     payload = body.get('payload') or {}
+    # Ensure payload always contains canonical keys so downstream consumers (notebooks) see them
+    try:
+        payload.setdefault('postId', payload.get('postId') or payload.get('post_id') or None)
+        payload.setdefault('url', payload.get('url') or None)
+    except Exception:
+        payload = payload or {}
     user_id = body.get('userId') or 'anon'
     if not app_id or not rtype:
         return jsonify({'error': 'Missing app_id or type'}), 400
     try:
         col = fs_db.collection(f"artifacts/{app_id}/private_user_reports")
-        col.add({'type': rtype, 'payload': payload, 'userId': user_id, 'timestamp': firestore.SERVER_TIMESTAMP})
+        # Compute label (1=phishing, 0=benign) to make downstream consumers' life easier
+        try:
+            label_val = 1 if rtype in ('true_positive', 'false_negative') else 0
+        except Exception:
+            label_val = None
+        # Persist doc with normalized payload and label
+        col.add({
+            'type': rtype,
+            'payload': payload,
+            'userId': user_id,
+            'url': payload.get('url'),
+            'postId': payload.get('postId'),
+            'label': label_val,
+            'timestamp': firestore.SERVER_TIMESTAMP
+        })
         return jsonify({'status': 'ok'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/report_bulk', methods=['POST'])
+def report_bulk():
+    """Accept a batch of report objects and store them in Firestore.
+    Expected JSON: { "items": [ {"app_id":..., "type":..., "payload":..., "userId":...}, ... ] }
+    """
+    if not _fs_ok():
+        return jsonify({'error': 'Firestore not configured on server'}), 500
+    data = request.get_json() or {}
+    items = data.get('items') or []
+    if not isinstance(items, list) or len(items) == 0:
+        return jsonify({'status': 'ok', 'written': 0})
+    written = 0
+    try:
+        for it in items:
+            app_id = it.get('app_id')
+            rtype = it.get('type')
+            payload = it.get('payload') or {}
+            try:
+                payload.setdefault('postId', payload.get('postId') or payload.get('post_id') or None)
+                payload.setdefault('url', payload.get('url') or None)
+            except Exception:
+                payload = payload or {}
+            user_id = it.get('userId') or 'anon'
+            if not app_id or not rtype:
+                continue
+            col = fs_db.collection(f"artifacts/{app_id}/private_user_reports")
+            try:
+                label_val = 1 if rtype in ('true_positive', 'false_negative') else 0
+            except Exception:
+                label_val = None
+            col.add({'type': rtype, 'payload': payload, 'userId': user_id, 'url': payload.get('url'), 'postId': payload.get('postId'), 'label': label_val, 'timestamp': firestore.SERVER_TIMESTAMP})
+            written += 1
+        return jsonify({'status': 'ok', 'written': written})
+    except Exception as e:
+        return jsonify({'error': str(e), 'written': written}), 500
+
+
+@app.route('/review_queue', methods=['POST'])
+def review_queue():
+    """Accept a single review item or batch and store to Firestore under artifacts/{app_id}/review_queue"""
+    if not _fs_ok():
+        return jsonify({'error': 'Firestore not configured on server'}), 500
+    data = request.get_json() or {}
+    items = []
+    # Accept either single dict or list under 'items'
+    if isinstance(data, dict) and data.get('items'):
+        items = data.get('items')
+    elif isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = [data]
+
+    written = 0
+    try:
+        for it in items:
+            app_id = it.get('app_id') or it.get('appId') or (it.get('app_id') or it.get('appId'))
+            payload = it.get('payload') or it
+            user_id = it.get('userId') or it.get('user_id') or 'anon'
+            if not app_id:
+                continue
+            # Build a dedupe key from postId and url if present
+            postId = None
+            url = None
+            try:
+                postId = payload.get('postId') or payload.get('post_id')
+            except Exception:
+                postId = None
+            try:
+                url = payload.get('url')
+            except Exception:
+                url = None
+
+            # Compute document id hash to dedupe
+            import hashlib
+            key_parts = [str(app_id)]
+            if postId is not None:
+                key_parts.append(str(postId))
+            if url is not None:
+                key_parts.append(str(url))
+            doc_key_raw = '|'.join(key_parts)
+            doc_id = hashlib.sha256(doc_key_raw.encode('utf-8')).hexdigest()
+
+            col = fs_db.collection(f"artifacts/{app_id}/review_queue")
+            doc_ref = col.document(doc_id)
+            try:
+                existing = doc_ref.get()
+                if existing.exists:
+                    # Already queued; skip to avoid duplicates
+                    continue
+                else:
+                    # optional TTL: set expires_at if REVIEW_TTL_DAYS configured
+                    expires_days = int(os.environ.get('REVIEW_TTL_DAYS', '0') or '0')
+                    expires_at = None
+                    if expires_days > 0:
+                        expires_at = datetime.utcnow() + timedelta(days=expires_days)
+                    payload_doc = {'payload': payload, 'userId': user_id, 'timestamp': firestore.SERVER_TIMESTAMP, 'processed': False}
+                    if expires_at is not None:
+                        payload_doc['expires_at'] = expires_at
+                    doc_ref.set(payload_doc)
+                    written += 1
+            except Exception:
+                # Fallback to add if document operations fail
+                add_doc = {'payload': payload, 'userId': user_id, 'timestamp': firestore.SERVER_TIMESTAMP, 'processed': False}
+                try:
+                    expires_days = int(os.environ.get('REVIEW_TTL_DAYS', '0') or '0')
+                    if expires_days > 0:
+                        add_doc['expires_at'] = datetime.utcnow() + timedelta(days=expires_days)
+                except Exception:
+                    pass
+                col.add(add_doc)
+                written += 1
+        return jsonify({'status': 'ok', 'written': written})
+    except Exception as e:
+        return jsonify({'error': str(e), 'written': written}), 500
 
 
 @app.route('/reload_models', methods=['POST'])
@@ -370,6 +639,37 @@ def model_info():
     }
     return jsonify(info)
 
+
+@app.route('/debug/recent_reports', methods=['GET'])
+def debug_recent_reports():
+    """Return recent user reports and a small summary (counts per type/label).
+    For safety this endpoint should be restricted in production; currently available for local debugging only.
+    Query params: ?limit=50
+    """
+    if not _fs_ok():
+        return jsonify({'error': 'Firestore not configured on server'}), 500
+    try:
+        limit = int(request.args.get('limit', '50'))
+    except Exception:
+        limit = 50
+    try:
+        col = fs_db.collection(f"artifacts/ads-phishing-link/private_user_reports")
+        docs = list(col.order_by('timestamp', direction=firestore.Query.DESCENDING).limit(limit).stream())
+        items = []
+        counts_by_type = {}
+        counts_by_label = { '0': 0, '1': 0, 'null': 0 }
+        for d in docs:
+            dd = d.to_dict()
+            rtype = dd.get('type')
+            payload = dd.get('payload') or {}
+            label = dd.get('label') if 'label' in dd else (1 if rtype in ('true_positive', 'false_negative') else 0)
+            counts_by_type[rtype] = counts_by_type.get(rtype, 0) + 1
+            counts_by_label[str(label) if label is not None else 'null'] = counts_by_label.get(str(label), 0) + 1
+            items.append({ 'id': d.id, 'type': rtype, 'label': label, 'url': dd.get('url') or payload.get('url'), 'postId': dd.get('postId') or payload.get('postId'), 'payload': payload, 'ts': dd.get('timestamp') })
+        return jsonify({ 'count': len(items), 'by_type': counts_by_type, 'by_label': counts_by_label, 'items': items })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/flag', methods=['POST'])
 def flag():
     if not _fs_ok():
@@ -391,5 +691,5 @@ def flag():
 # [Include remaining endpoints from your original app.py]
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=80)
+    app.run(host="0.0.0.0", port=8080)
 
