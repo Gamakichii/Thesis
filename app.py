@@ -1,4 +1,4 @@
-import numpy as np 
+import numpy as np
 import pandas as pd
 import pickle
 from flask import Flask, request, jsonify
@@ -9,7 +9,6 @@ from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 import tldextract
 import json
 import os
-import base64
 from google.oauth2 import service_account
 from google.cloud import firestore
 
@@ -19,6 +18,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # --- Initialize App ---
 app = Flask(__name__)
 CORS(app, origins=["*"])  # Allow all origins for Chrome extension
+
+# Azure Container App will inject PORT
+PORT = int(os.environ.get("PORT", 8000))
 
 # --- Model Loading ---
 MODEL_LOAD_ERROR = None
@@ -32,6 +34,9 @@ models_last_loaded_at = None
 
 
 def load_models():
+    """Load model artifacts from disk and set global variables.
+    This can be called at startup or via the /reload_models endpoint.
+    """
     global MODEL_LOAD_ERROR, autoencoder_model, scaler, autoencoder_threshold, effective_autoencoder_threshold, gnn_probs, post_node_map, models_last_loaded_at
     MODEL_LOAD_ERROR = None
     autoencoder_model = None
@@ -104,15 +109,26 @@ load_models()
 # --- Firestore Client ---
 fs_db = None
 try:
-    firebase_sa_b64 = os.environ.get("FIREBASE_SA")
-    if firebase_sa_b64:
-        firebase_sa_json = base64.b64decode(firebase_sa_b64).decode("utf-8")
-        creds_info = json.loads(firebase_sa_json)
+    google_creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if google_creds:
+        creds_info = json.loads(google_creds)
         creds = service_account.Credentials.from_service_account_info(creds_info)
         fs_db = firestore.Client(credentials=creds, project=creds_info["project_id"])
-        print("✅ Firestore client initialized from FIREBASE_SA environment variable.")
+        print("✅ Firestore client initialized from environment variable.")
     else:
-        print("⚠️ FIREBASE_SA not set. Firestore writes disabled.")
+        # Fallback to local file
+        for sa_path in [
+            os.path.join(HERE, "firebase-sa.json"),
+            os.path.join(HERE, "service-account.json"),
+            os.path.join(HERE, "gcp-sa.json"),
+        ]:
+            if os.path.exists(sa_path):
+                creds = service_account.Credentials.from_service_account_file(sa_path)
+                fs_db = firestore.Client(credentials=creds, project=creds.project_id)
+                print(f"✅ Firestore client initialized from file: {os.path.basename(sa_path)}")
+                break
+        if fs_db is None:
+            print("⚠️ No Firestore credentials found. Firestore writes disabled.")
 except Exception as ee:
     print(f"⚠️ Firestore init failed: {ee}")
 
@@ -375,5 +391,5 @@ def flag():
 # [Include remaining endpoints from your original app.py]
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=80)
 

@@ -1,0 +1,57 @@
+name: Export Feedback Dataset
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_id:
+        description: "App ID used in Firestore paths (artifacts/{app-id}/...)"
+        required: false
+        default: ""
+      include_flagged:
+        description: "Include public flagged links as weak positives"
+        required: false
+        default: "true"
+  schedule:
+    - cron: "0 2 * * *" # daily at 02:00 UTC
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r data_pipeline/requirements.txt
+
+      - name: Write service account key
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          if [ -z "$GCP_SA_KEY" ]; then echo "Missing GCP_SA_KEY secret" && exit 1; fi
+          echo "$GCP_SA_KEY" > $RUNNER_TEMP/gcp_key.json
+
+      - name: Export feedback dataset
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/gcp_key.json
+        run: |
+          APP_ID_INPUT="${{ github.event.inputs.app_id }}"
+          INCLUDE_FLAGGED_INPUT="${{ github.event.inputs.include_flagged }}"
+          APP_ID_ARG=${APP_ID_INPUT:-${{ vars.APP_ID }}}
+          INCLUDE_FLAGGED_FLAG=""
+          if [ "$INCLUDE_FLAGGED_INPUT" = "true" ]; then INCLUDE_FLAGGED_FLAG="--include-flagged"; fi
+          python data_pipeline/export_feedback.py --app-id "$APP_ID_ARG" $INCLUDE_FLAGGED_FLAG --output feedback_dataset.csv
+
+      - name: Upload CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: feedback-dataset
+          path: feedback_dataset.csv
+
+
