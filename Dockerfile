@@ -20,5 +20,8 @@ COPY . .
 # Expose port 8080
 EXPOSE 8080
 
-# Start with gunicorn
-CMD ["gunicorn", "-w", "2", "-b", "0.0.0.0:8080", "app:app"]
+# Ensure unbuffered logs
+ENV PYTHONUNBUFFERED=1
+
+# Start Gunicorn directly
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers=1", "--timeout=600", "--access-logfile=-", "--error-logfile=-", "app:app"]
