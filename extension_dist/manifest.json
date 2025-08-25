@@ -13,7 +13,8 @@
     "https://8711b47f1219.ngrok-free.app/*",
     "https://*.ngrok-free.app/*",
     "https://dakugumen-api.mangosea-8f507dd6.southeastasia.azurecontainerapps.io/*",
-    "http://127.0.0.1:80/*"
+    "http://127.0.0.1:80/*",
+    "https://dakugumen-thesis-qxtmk.ondigitalocean.app/*"
   ],
   "background": {
     "service_worker": "background.js",
