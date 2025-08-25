@@ -17,7 +17,7 @@ import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnap
   };
   const initialAuthToken = null; // keep null; we use anonymous auth
   // Backend API base URL (can be overridden via `chrome.storage.sync` key `api_base_url`)
-  const DEFAULT_API_BASE_URL = "http://127.0.0.1:80"; // your container URL
+  const DEFAULT_API_BASE_URL = "https://dakugumen-thesis-qxtmk.ondigitalocean.app"; // your container URL
   // "https://dakugumen-api.mangosea-8f507dd6.southeastasia.azurecontainerapps.io"; // your container URL
   let API_BASE_URL = DEFAULT_API_BASE_URL;
 
