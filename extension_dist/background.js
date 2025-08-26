@@ -601,45 +601,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         (async () => {
             try {
                 const { postId, author, ts, domains = [], counts = {} } = request;
-                const payload = { app_id: appId, userId: userId || 'anon', postId, author, ts, domains, counts };
-                try {
-                    const res = await fetch(`${API_BASE_URL}/graph_ingest`, {
-                        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-                    });
-                    if (!res.ok) {
-                        const txt = await res.text();
-                        console.error('graph_ingest returned non-ok:', res.status, txt);
-                        // If server indicates Firestore is not configured, fall back to client writes
-                        if (res.status === 500 && txt && txt.includes('Firestore not configured')) {
-                            throw new Error('FALLBACK_CLIENT_FIRESTORE');
-                        }
-                        sendResponse({ status: 'error', message: txt });
-                        return;
-                    }
-                    const data = await res.json();
-                    sendResponse(data);
-                } catch (e) {
-                    // Network or explicit fallback requested -> write directly to Firestore from client
-                    console.warn('Backend graph_ingest failed, falling back to client Firestore:', e);
-                    try {
-                        // Upsert user node
-                        await upsertGraphNode(userNodeId(userId || 'anon'), { type: 'user', userId: userId || 'anon' });
-                        // Upsert post node
-                        if (postId != null) await upsertGraphNode(postNodeId(postId), { type: 'post', postId, author: author || null, ts: ts || Date.now(), domains, counts });
-                        // Upsert domain nodes and add contains edges
-                        for (const d of domains) {
-                            await upsertGraphNode(domainNodeId(d), { type: 'domain', domain: d });
-                            await addGraphEdge({ src: postNodeId(postId), dst: domainNodeId(d), edgeType: 'contains' });
-                        }
-                        if (postId != null) await addGraphEdge({ src: userNodeId(userId || 'anon'), dst: postNodeId(postId), edgeType: 'view' });
-                        sendResponse({ status: 'ok', fallback: true });
-                    } catch (ee) {
-                        console.error('Client-side Firestore fallback failed:', ee);
-                        sendResponse({ status: 'error', message: String(ee) });
-                    }
+                await upsertGraphNode(userNodeId(userId), { type: 'user', userId });
+                await upsertGraphNode(postNodeId(postId), { type: 'post', postId, author: author || null, ts: ts || Date.now(), domains, counts });
+                for (const d of domains) {
+                    await upsertGraphNode(domainNodeId(d), { type: 'domain', domain: d });
+                    await addGraphEdge({ src: postNodeId(postId), dst: domainNodeId(d), edgeType: 'contains' });
                 }
+                await addGraphEdge({ src: userNodeId(userId), dst: postNodeId(postId), edgeType: 'view' });
+                sendResponse({ status: 'ok' });
             } catch (e) {
-                console.error('graphIngestPost error:', e);
+                console.error('graphIngestPost error', e);
                 sendResponse({ status: 'error', message: String(e) });
             }
         })();
@@ -649,35 +620,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             try {
                 const { domain, postId = null } = request;
                 if (!domain) { sendResponse({ status: 'error', message: 'missing domain' }); return; }
-                const payload = { app_id: appId, userId: userId || 'anon', domain, postId };
-                try {
-                    const res = await fetch(`${API_BASE_URL}/graph_click`, {
-                        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-                    });
-                    if (!res.ok) {
-                        const txt = await res.text();
-                        console.error('graph_click returned non-ok:', res.status, txt);
-                        if (res.status === 500 && txt && txt.includes('Firestore not configured')) {
-                            throw new Error('FALLBACK_CLIENT_FIRESTORE');
-                        }
-                        sendResponse({ status: 'error', message: txt });
-                        return;
-                    }
-                    const data = await res.json();
-                    sendResponse(data);
-                } catch (e) {
-                    // Fallback to client-side writes
-                    console.warn('Backend graph_click failed, falling back to client Firestore:', e);
-                    try {
-                        await upsertGraphNode(userNodeId(userId || 'anon'), { type: 'user', userId: userId || 'anon' });
-                        await upsertGraphNode(domainNodeId(domain), { type: 'domain', domain });
-                        await addGraphEdge({ src: userNodeId(userId || 'anon'), dst: domainNodeId(domain), edgeType: 'click', postId });
-                        sendResponse({ status: 'ok', fallback: true });
-                    } catch (ee) {
-                        console.error('Client-side Firestore fallback failed:', ee);
-                        sendResponse({ status: 'error', message: String(ee) });
-                    }
-                }
+                await upsertGraphNode(userNodeId(userId), { type: 'user', userId });
+                await upsertGraphNode(domainNodeId(domain), { type: 'domain', domain });
+                await addGraphEdge({ src: userNodeId(userId), dst: domainNodeId(domain), edgeType: 'click', postId });
+                sendResponse({ status: 'ok' });
             } catch (e) {
                 console.error('graphClick error', e);
                 sendResponse({ status: 'error', message: String(e) });
