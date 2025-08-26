@@ -601,16 +601,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         (async () => {
             try {
                 const { postId, author, ts, domains = [], counts = {} } = request;
-                await upsertGraphNode(userNodeId(userId), { type: 'user', userId });
-                await upsertGraphNode(postNodeId(postId), { type: 'post', postId, author: author || null, ts: ts || Date.now(), domains, counts });
-                for (const d of domains) {
-                    await upsertGraphNode(domainNodeId(d), { type: 'domain', domain: d });
-                    await addGraphEdge({ src: postNodeId(postId), dst: domainNodeId(d), edgeType: 'contains' });
+                const payload = { app_id: appId, userId: userId || 'anon', postId, author, ts, domains, counts };
+                const res = await fetch(`${API_BASE_URL}/graph_ingest`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+                });
+                if (!res.ok) {
+                    const txt = await res.text();
+                    console.error('graph_ingest returned non-ok:', res.status, txt);
+                    sendResponse({ status: 'error', message: txt });
+                    return;
                 }
-                await addGraphEdge({ src: userNodeId(userId), dst: postNodeId(postId), edgeType: 'view' });
-                sendResponse({ status: 'ok' });
+                const data = await res.json();
+                sendResponse(data);
             } catch (e) {
-                console.error('graphIngestPost error', e);
+                console.error('graphIngestPost error:', e);
                 sendResponse({ status: 'error', message: String(e) });
             }
         })();
@@ -620,10 +624,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             try {
                 const { domain, postId = null } = request;
                 if (!domain) { sendResponse({ status: 'error', message: 'missing domain' }); return; }
-                await upsertGraphNode(userNodeId(userId), { type: 'user', userId });
-                await upsertGraphNode(domainNodeId(domain), { type: 'domain', domain });
-                await addGraphEdge({ src: userNodeId(userId), dst: domainNodeId(domain), edgeType: 'click', postId });
-                sendResponse({ status: 'ok' });
+                const payload = { app_id: appId, userId: userId || 'anon', domain, postId };
+                const res = await fetch(`${API_BASE_URL}/graph_click`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+                });
+                if (!res.ok) {
+                    const txt = await res.text();
+                    console.error('graph_click returned non-ok:', res.status, txt);
+                    sendResponse({ status: 'error', message: txt });
+                    return;
+                }
+                const data = await res.json();
+                sendResponse(data);
             } catch (e) {
                 console.error('graphClick error', e);
                 sendResponse({ status: 'error', message: String(e) });
