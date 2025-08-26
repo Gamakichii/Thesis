@@ -687,6 +687,84 @@ def flag():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/graph_ingest', methods=['POST'])
+def graph_ingest():
+    if not _fs_ok():
+        return jsonify({'error': 'Firestore not configured on server'}), 500
+    data = request.get_json() or {}
+    app_id = data.get('app_id') or 'ads-phishing-link'
+    user_id = data.get('userId') or data.get('user_id') or data.get('user') or 'anon'
+    postId = data.get('postId') or data.get('post_id')
+    author = data.get('author')
+    ts = data.get('ts')
+    domains = data.get('domains') or []
+    counts = data.get('counts') or {}
+    try:
+        nodes_col = fs_db.collection(f"artifacts/{app_id}/private/graph/nodes")
+        edges_col = fs_db.collection(f"artifacts/{app_id}/private/graph/edges")
+        # Upsert user node
+        try:
+            nodes_col.document(f"user:{user_id}").set({'type': 'user', 'userId': user_id}, merge=True)
+        except Exception:
+            pass
+        # Upsert post node
+        if postId is not None:
+            try:
+                nodes_col.document(f"post:{postId}").set({'type': 'post', 'postId': postId, 'author': author, 'ts': ts, 'domains': domains, 'counts': counts}, merge=True)
+            except Exception:
+                pass
+        # Upsert domain nodes and add contains edges
+        for d in domains:
+            try:
+                nodes_col.document(f"domain:{d}").set({'type': 'domain', 'domain': d}, merge=True)
+            except Exception:
+                pass
+            try:
+                edges_col.add({'src': f"post:{postId}", 'dst': f"domain:{d}", 'edgeType': 'contains', 'timestamp': firestore.SERVER_TIMESTAMP})
+            except Exception:
+                pass
+        # Add view edge from user to post
+        if postId is not None:
+            try:
+                edges_col.add({'src': f"user:{user_id}", 'dst': f"post:{postId}", 'edgeType': 'view', 'timestamp': firestore.SERVER_TIMESTAMP})
+            except Exception:
+                pass
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/graph_click', methods=['POST'])
+def graph_click():
+    if not _fs_ok():
+        return jsonify({'error': 'Firestore not configured on server'}), 500
+    data = request.get_json() or {}
+    app_id = data.get('app_id') or 'ads-phishing-link'
+    domain = data.get('domain')
+    postId = data.get('postId') or data.get('post_id')
+    user_id = data.get('userId') or data.get('user_id') or 'anon'
+    try:
+        nodes_col = fs_db.collection(f"artifacts/{app_id}/private/graph/nodes")
+        edges_col = fs_db.collection(f"artifacts/{app_id}/private/graph/edges")
+        # Upsert user node
+        try:
+            nodes_col.document(f"user:{user_id}").set({'type': 'user', 'userId': user_id}, merge=True)
+        except Exception:
+            pass
+        # Upsert domain node and add click edge
+        if domain:
+            try:
+                nodes_col.document(f"domain:{domain}").set({'type': 'domain', 'domain': domain}, merge=True)
+            except Exception:
+                pass
+            try:
+                edges_col.add({'src': f"user:{user_id}", 'dst': f"domain:{domain}", 'edgeType': 'click', 'postId': postId, 'timestamp': firestore.SERVER_TIMESTAMP})
+            except Exception:
+                pass
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 # Add other endpoints (graph_ingest, graph_click) as in original...
 # [Include remaining endpoints from your original app.py]
 
