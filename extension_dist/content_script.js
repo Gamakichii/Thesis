@@ -336,6 +336,50 @@ function getFacebookPostElements() {
     return posts;
 }
 
+// Attempt to extract a stable numeric ID from common Facebook permalink patterns
+function extractStableIdFromHref(href) {
+    try {
+        const u = new URL(href, location.href);
+        // Check common query params first
+        try {
+            const qp = u.searchParams;
+            const storyFbid = qp.get('story_fbid') || qp.get('fbid') || qp.get('id');
+            if (storyFbid && /^\d+$/.test(storyFbid)) return storyFbid;
+        } catch (e) {}
+
+        const path = (u.pathname || '').toLowerCase();
+
+        const regexes = [
+            /\/posts\/(\d+)/i,
+            /\/videos\/(\d+)/i,
+            /\/photos\/.+\/(\d+)/i,
+            /\/groups\/[\w\-\.]+\/permalink\/(\d+)/i,
+            /\/permalink\.php.*[?&](?:story_fbid|fbid)=(\d+)/i,
+            /\/permalink\/(\d+)/i,
+            /\/photo\.php.*[?&]fbid=(\d+)/i
+        ];
+
+        for (const r of regexes) {
+            const m = path.match(r) || u.href.match(r);
+            if (m && m[1]) return m[1];
+        }
+    } catch (e) {}
+    return null;
+}
+
+function findStableIdForPost(postElement) {
+    try {
+        const anchors = postElement.querySelectorAll('a[href]');
+        for (const a of anchors) {
+            const href = a.href;
+            if (!href) continue;
+            const id = extractStableIdFromHref(href);
+            if (id) return 'stable:' + id;
+        }
+    } catch (e) {}
+    return null;
+}
+
 // Function to scan the current page for posts and send to background script
 async function scanAndSendPosts() {
     console.log("Content script: Scanning for posts...");
@@ -343,9 +387,20 @@ async function scanAndSendPosts() {
     const newPostsData = [];
 
     posts.forEach((postElement, index) => {
-        // Assign a unique ID to each post element for tracking
-        const postId = postElement.dataset.phishingPostId || `post-${Date.now()}-${index}`;
-        postElement.dataset.phishingPostId = postId;
+        // Assign a stable ID to each post element when possible. Fall back to timestamp-based ID only if needed.
+        let postId = postElement.dataset.phishingPostId || null;
+
+        if (!postId) {
+            // Try to find a stable permalink-based ID inside the post element
+            const stable = findStableIdForPost(postElement);
+            if (stable) {
+                postId = stable;
+            } else {
+                // Fallback: preserve existing fallback behavior (timestamp + index)
+                postId = `post-${Date.now()}-${index}`;
+            }
+            postElement.dataset.phishingPostId = postId;
+        }
 
         // Store links on the element for later reporting and controls
         const content = extractPostContent(postElement);
