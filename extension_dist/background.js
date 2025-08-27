@@ -128,6 +128,16 @@ function postNodeId(postId) { return `post:${postId}`; }
 function domainNodeId(domain) { return `domain:${domain}`; }
 function userNodeId(uid) { return `user:${uid}`; }
 
+// Normalize post IDs produced by the content script (strip prefixes like 'stable:' or 'post:')
+function normalizePostId(postId) {
+    if (postId === null || postId === undefined) return null;
+    try {
+        return String(postId).replace(/^(?:stable:|post:)/, '');
+    } catch (e) {
+        return String(postId);
+    }
+}
+
 // Add a collection for user reports (private by rules)
 function getUserReportsCollectionRef() {
     if (!db) {
@@ -168,13 +178,15 @@ async function ensureGraphNodeForReport(postId, links = []) {
         const domains = Array.from(new Set((Array.isArray(links) ? links : []).map((h) => {
             try { return new URL(h).hostname; } catch { return null; }
         }).filter(Boolean)));
+        // Ensure we use a normalized post id when creating graph nodes so it matches training keys
+        const normalized = normalizePostId(postId);
         await upsertGraphNode(userNodeId(userId || 'anon'), { type: 'user', userId: userId || 'anon' });
-        await upsertGraphNode(postNodeId(postId), { type: 'post', postId });
+        await upsertGraphNode(postNodeId(normalized), { type: 'post', postId: normalized });
         for (const d of domains) {
             await upsertGraphNode(domainNodeId(d), { type: 'domain', domain: d });
-            await addGraphEdge({ src: postNodeId(postId), dst: domainNodeId(d), edgeType: 'contains' });
+            await addGraphEdge({ src: postNodeId(normalized), dst: domainNodeId(d), edgeType: 'contains' });
         }
-        await addGraphEdge({ src: userNodeId(userId || 'anon'), dst: postNodeId(postId), edgeType: 'view' });
+        await addGraphEdge({ src: userNodeId(userId || 'anon'), dst: postNodeId(normalized), edgeType: 'view' });
     } catch (e) {
         console.warn('ensureGraphNodeForReport failed:', e);
     }
@@ -462,10 +474,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // Message from content_script.js with extracted post data
         console.log("Background script: Received posts for analysis:", request.posts.length);
         request.posts.forEach(async (post) => {
-            const prediction = await getMLPrediction(post.text, post.links, post.id);
+            // Keep UI-facing post id intact for messaging, but normalize the id sent to ML/backend
+            const uiPostId = post.id;
+            const backendPostId = normalizePostId(post.id);
+            const prediction = await getMLPrediction(post.text, post.links, backendPostId);
             const preds = prediction.predictions || [];
             if (prediction.isPhishing) {
-                console.warn(`Phishing detected in post ${post.id}! Links: ${post.links.join(', ')}`);
+                console.warn(`Phishing detected in post ${uiPostId}! Links: ${post.links.join(', ')}`);
                 // Store the flagged link in Firestore
                 for (const link of prediction.flaggedLinks) {
                     await addFlaggedLink(link, userId);
@@ -474,23 +489,23 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 // Send message back to content script to blur the post (mark as auto-detected)
                 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
                     if (tabs[0]) {
-                        chrome.tabs.sendMessage(tabs[0].id, { action: "blurPost", postId: post.id, autoDetected: true });
+                        chrome.tabs.sendMessage(tabs[0].id, { action: "blurPost", postId: uiPostId, autoDetected: true });
                     }
                 });
             } else {
                 // Unblur if previously blurred by a heuristic (now disabled) or prior run
                 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
                     if (tabs[0]) {
-                        chrome.tabs.sendMessage(tabs[0].id, { action: "unblurPost", postId: post.id });
+                        chrome.tabs.sendMessage(tabs[0].id, { action: "unblurPost", postId: uiPostId });
                     }
                 });
             }
-            // Enqueue borderline predictions for review
+            // Enqueue borderline predictions for review (use normalized backend id)
             try {
                 for (const p of preds) {
                     const score = p.final_score || 0;
                     if (score >= REVIEW_MIN && score <= REVIEW_MAX) {
-                        REVIEW_QUEUE.push({ app_id: appId, payload: { postId: post.id, url: p.url, final_score: score }, userId: userId });
+                        REVIEW_QUEUE.push({ app_id: appId, payload: { postId: backendPostId, url: p.url, final_score: score }, userId: userId });
                     }
                 }
                 if (REVIEW_QUEUE.length >= REVIEW_BATCH_SIZE) flushReviewQueue();
