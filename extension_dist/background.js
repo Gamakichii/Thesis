@@ -128,39 +128,13 @@ function postNodeId(postId) { return `post:${postId}`; }
 function domainNodeId(domain) { return `domain:${domain}`; }
 function userNodeId(uid) { return `user:${uid}`; }
 
-// Add a collection for user reports (private by rules)
-function getUserReportsCollectionRef() {
-    if (!db) {
-        console.error("Firestore not initialized.");
-        return null;
-    }
-    return collection(db, `artifacts/${appId}/private_user_reports`);
-}
+// NOTE: getUserReportsCollectionRef removed. All user reports are sent to the backend via `serverReport`.
 
-async function addUserReport(type, payload) {
-    const collectionRef = getUserReportsCollectionRef();
-    if (!collectionRef) return false;
-    try {
-        // Normalize payload and compute label client-side so Firestore entries are consistent
-        const normalized = Object.assign({}, payload || {});
-        normalized.postId = normalized.postId || normalized.post_id || null;
-        normalized.url = normalized.url || (Array.isArray(normalized.links) && normalized.links.length ? normalized.links[0] : normalized.url) || null;
-        const label = (type === 'true_positive' || type === 'false_negative') ? 1 : 0;
-        await addDoc(collectionRef, {
-            type,
-            payload: normalized,
-            userId: userId || 'anon',
-            url: normalized.url,
-            postId: normalized.postId,
-            label: label,
-            timestamp: new Date()
-        });
-        return true;
-    } catch (e) {
-        console.error('Firestore: Error adding user report:', e);
-        return false;
-    }
-}
+// NOTE: Client-side Firestore writes for user reports have been removed.
+// All user report writes are now centralized via `serverReport` which
+// enqueues reports to be sent to the backend (`app.py`) for processing.
+// The previous `addUserReport` implementation was intentionally removed to
+// avoid direct client-side database writes for private user reports.
 
 // Ensure graph nodes/edges exist for a reported post to avoid training-time mismatches
 async function ensureGraphNodeForReport(postId, links = []) {
@@ -510,7 +484,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     await ensureGraphNodeForReport(request.postId, links);
                 }
                 const payload = { postId: request.postId, links, url: primaryUrl };
-                await addUserReport('false_positive', payload);
+                // Enqueue report for server-side processing; do not perform client-side Firestore writes
                 await serverReport('false_positive', payload);
                 sendResponse({ status: 'reported' });
             } catch (e) {
@@ -532,10 +506,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     await ensureGraphNodeForReport(request.postId, [url]);
                 }
                 const payload = { url, postId: request.postId || null };
-                await addUserReport('false_negative', payload);
+                // Enqueue report for server-side processing; do not perform client-side Firestore writes
                 await serverReport('false_negative', payload);
-                // Also store under flagged links (public), since user asserts it is malicious
-                await addFlaggedLink(url, userId);
+                // Also enqueue adding flagged link to server for public flagged links storage
+                await serverReport('flagged_link', { url, detectedByUserId: userId });
                 sendResponse({ status: 'reported' });
             } catch (e) {
                 console.error('Error reporting false negative:', e);
@@ -551,11 +525,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 const primaryUrl = (links && links.length) ? links[0] : (request.url || null);
                 await ensureGraphNodeForReport(request.postId, links);
                 const payload = { postId: request.postId, links, url: primaryUrl, source: 'manual' };
-                await addUserReport('true_positive', payload);
+                // Enqueue report for server-side processing; do not perform client-side Firestore writes
                 await serverReport('true_positive', payload);
-                // Also store under flagged links (public)
+                // Also enqueue adding flagged links to server for public flagged links storage
                 for (const link of links) {
-                    await addFlaggedLink(link, userId);
+                    await serverReport('flagged_link', { url: link, detectedByUserId: userId });
                 }
                 // Ask content script to blur it again just in case
                 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -578,7 +552,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 const primaryUrl = (links && links.length) ? links[0] : (request.url || null);
                 await ensureGraphNodeForReport(request.postId, links);
                 const payload = { postId: request.postId, links, url: primaryUrl, source: 'manual' };
-                await addUserReport('true_negative', payload);
+                // Enqueue report for server-side processing; do not perform client-side Firestore writes
                 await serverReport('true_negative', payload);
                 sendResponse({ status: 'ok' });
             } catch (e) {
