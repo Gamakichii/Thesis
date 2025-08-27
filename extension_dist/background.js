@@ -161,6 +161,18 @@ async function addUserReport(type, payload) {
     }
 }
 
+// Retrieve stored fingerprint metadata for a given postId from chrome.storage.local
+function getStoredPostFingerprint(postId) {
+    return new Promise((resolve) => {
+        try {
+            chrome.storage.local.get(['postIdMap'], (res) => {
+                const map = (res && res.postIdMap) ? res.postIdMap : {};
+                resolve(map[postId] || null);
+            });
+        } catch (e) { resolve(null); }
+    });
+}
+
 // Ensure graph nodes/edges exist for a reported post to avoid training-time mismatches
 async function ensureGraphNodeForReport(postId, links = []) {
     try {
@@ -505,10 +517,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 const links = Array.isArray(request.links) ? request.links : [];
                 // Prefer a primary url in payload for training; use first link if available
                 const primaryUrl = (links && links.length) ? links[0] : (request.url || null);
+                let fingerprint = null;
                 if (request.postId) {
+                    fingerprint = await getStoredPostFingerprint(request.postId);
                     await ensureGraphNodeForReport(request.postId, links);
                 }
-                const payload = { postId: request.postId, links, url: primaryUrl };
+                const payload = { postId: request.postId, links, url: primaryUrl, fingerprint };
                 await addUserReport('false_positive', payload);
                 await serverReport('false_positive', payload);
                 sendResponse({ status: 'reported' });
@@ -527,10 +541,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     sendResponse({ status: 'error', message: 'Missing url' });
                     return;
                 }
+                let fingerprint = null;
                 if (request.postId) {
+                    fingerprint = await getStoredPostFingerprint(request.postId);
                     await ensureGraphNodeForReport(request.postId, [url]);
                 }
-                const payload = { url, postId: request.postId || null };
+                const payload = { url, postId: request.postId || null, fingerprint };
                 await addUserReport('false_negative', payload);
                 await serverReport('false_negative', payload);
                 // Also store under flagged links (public), since user asserts it is malicious
@@ -548,8 +564,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             try {
                 const links = Array.isArray(request.links) ? request.links : [];
                 const primaryUrl = (links && links.length) ? links[0] : (request.url || null);
+                const fingerprint = await getStoredPostFingerprint(request.postId);
                 await ensureGraphNodeForReport(request.postId, links);
-                const payload = { postId: request.postId, links, url: primaryUrl, source: 'manual' };
+                const payload = { postId: request.postId, links, url: primaryUrl, source: 'manual', fingerprint };
                 await addUserReport('true_positive', payload);
                 await serverReport('true_positive', payload);
                 // Also store under flagged links (public)
@@ -575,8 +592,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             try {
                 const links = Array.isArray(request.links) ? request.links : [];
                 const primaryUrl = (links && links.length) ? links[0] : (request.url || null);
+                const fingerprint = await getStoredPostFingerprint(request.postId);
                 await ensureGraphNodeForReport(request.postId, links);
-                const payload = { postId: request.postId, links, url: primaryUrl, source: 'manual' };
+                const payload = { postId: request.postId, links, url: primaryUrl, source: 'manual', fingerprint };
                 await addUserReport('true_negative', payload);
                 await serverReport('true_negative', payload);
                 sendResponse({ status: 'ok' });
