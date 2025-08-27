@@ -17,11 +17,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy app code
 COPY . .
 
-# Expose port 8080
-EXPOSE 8080
+# Expose port 80 (for Azure)
+EXPOSE 80
 
-# Ensure unbuffered logs
-ENV PYTHONUNBUFFERED=1
+# Ensure startup.sh has execute permissions
+RUN chmod +x startup.sh
 
-# Start Gunicorn directly
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers=1", "--timeout=600", "--access-logfile=-", "--error-logfile=-", "app:app"]
+# Startup script
+CMD ["./startup.sh"]
