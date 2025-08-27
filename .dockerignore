@@ -1,0 +1,14 @@
+# Ignore the extension distribution bundle (packed extension artifacts)
+extension_dist/
+
+# Python cache / env
+__pycache__/
+.venv/
+venv/
+*.pyc
+
+# Local env files
+.env
+.env.*
+
+
