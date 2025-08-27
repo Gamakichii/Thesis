@@ -349,14 +349,19 @@ function extractStableIdFromHref(href) {
 
         const path = (u.pathname || '').toLowerCase();
 
+        // Expanded list of common permalink patterns to capture more stable IDs
         const regexes = [
             /\/posts\/(\d+)/i,
             /\/videos\/(\d+)/i,
+            /\/video.php.*[?&]v=(\d+)/i,
             /\/photos\/.+\/(\d+)/i,
             /\/groups\/[\w\-\.]+\/permalink\/(\d+)/i,
+            /\/groups\/[\w\-\.]+\/posts\/(\d+)/i,
             /\/permalink\.php.*[?&](?:story_fbid|fbid)=(\d+)/i,
             /\/permalink\/(\d+)/i,
-            /\/photo\.php.*[?&]fbid=(\d+)/i
+            /\/photo\.php.*[?&]fbid=(\d+)/i,
+            /\/media/set\?.*set=(\d+)/i,
+            /\/(?:pg|profile)\/.*\/posts\/(\d+)/i
         ];
 
         for (const r of regexes) {
@@ -376,8 +381,48 @@ function findStableIdForPost(postElement) {
             const id = extractStableIdFromHref(href);
             if (id) return 'stable:' + id;
         }
+        // Also attempt data attributes that sometimes hold IDs
+        const dataIdAttrs = ['data-ft', 'data-store', 'data-quickpost-id', 'data-hovercard'];
+        for (const attr of dataIdAttrs) {
+            const val = postElement.getAttribute(attr);
+            if (!val) continue;
+            const m = (val.match(/(fbid|story_fbid|id|post_id)[:=\"]?(\d+)/) || val.match(/(\d{6,})/));
+            if (m && m[2]) return 'stable:' + m[2];
+            if (m && m[1] && /^\d+$/.test(m[1])) return 'stable:' + m[1];
+        }
     } catch (e) {}
     return null;
+}
+
+// Persist mapping of element dataset -> stable postId across sessions using chrome.storage.local
+async function persistPostIdMapping(postElement, postId) {
+    try {
+        // Keep a small map keyed by postId -> timestamp for cleanup if needed
+        chrome.storage.local.get(['postIdMap'], (res) => {
+            const map = (res && res.postIdMap) ? res.postIdMap : {};
+            map[postId] = { ts: Date.now() };
+            chrome.storage.local.set({ postIdMap: map });
+        });
+    } catch (e) {}
+}
+
+// Try to restore a postId from storage if element lacks it but we can derive a stable key
+function restorePostIdIfPresent(postElement) {
+    try {
+        // If the element has any stable href-derived ID, prefer it
+        const stable = findStableIdForPost(postElement);
+        if (stable) return stable;
+
+        // Otherwise, check if dataset.phishingPostId exists in storage keys (rare)
+        // We attempt to match by searching stored keys that might correspond to this element's links
+        const anchors = postElement.querySelectorAll('a[href]');
+        const hrefs = Array.from(anchors).map(a => a.href).filter(Boolean);
+        if (hrefs.length === 0) return null;
+
+        // Load stored map and try to find a key whose numeric id appears in any href
+        // This is heuristic and best-effort
+        return null; // simplified: real restoration requires stronger heuristics and is skipped here
+    } catch (e) { return null; }
 }
 
 // Function to scan the current page for posts and send to background script
