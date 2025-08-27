@@ -398,12 +398,39 @@ function findStableIdForPost(postElement) {
 async function persistPostIdMapping(postElement, postId) {
     try {
         // Keep a small map keyed by postId -> timestamp for cleanup if needed
+        const anchors = postElement.querySelectorAll('a[href]');
+        const hrefs = Array.from(anchors).map(a => a.href).filter(Boolean);
+        const hosts = Array.from(new Set(hrefs.map(h => { try { return new URL(h).hostname; } catch { return null; } }).filter(Boolean)));
+        const title = (postElement.querySelector('[data-testid="post_message"]') || postElement).textContent || '';
+        const fingerprint = {
+            ts: Date.now(),
+            hosts,
+            titleHash: simpleHash(title || ''),
+            sampleHrefs: hrefs.slice(0,3)
+        };
         chrome.storage.local.get(['postIdMap'], (res) => {
             const map = (res && res.postIdMap) ? res.postIdMap : {};
-            map[postId] = { ts: Date.now() };
+            map[postId] = fingerprint;
+            // Prune map to recent N entries to avoid unbounded growth
+            const MAX_ENTRIES = 2000;
+            const keys = Object.keys(map).sort((a,b) => (map[b].ts||0) - (map[a].ts||0));
+            if (keys.length > MAX_ENTRIES) {
+                const toRemove = keys.slice(MAX_ENTRIES);
+                toRemove.forEach(k => delete map[k]);
+            }
             chrome.storage.local.set({ postIdMap: map });
         });
     } catch (e) {}
+}
+
+// Simple non-crypto hash for short fingerprinting
+function simpleHash(s) {
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 16777619) >>> 0;
+    }
+    return (h >>> 0).toString(36);
 }
 
 // Try to restore a postId from storage if element lacks it but we can derive a stable key
@@ -413,17 +440,97 @@ function restorePostIdIfPresent(postElement) {
         const stable = findStableIdForPost(postElement);
         if (stable) return stable;
 
-        // Otherwise, check if dataset.phishingPostId exists in storage keys (rare)
-        // We attempt to match by searching stored keys that might correspond to this element's links
+        // Gather candidate keys from the element: hrefs, data attributes, text snippets
         const anchors = postElement.querySelectorAll('a[href]');
-        const hrefs = Array.from(anchors).map(a => a.href).filter(Boolean);
-        if (hrefs.length === 0) return null;
+        const hrefs = Array.from(anchors).map(a => (a.href || '').toString()).filter(Boolean);
 
-        // Load stored map and try to find a key whose numeric id appears in any href
-        // This is heuristic and best-effort
-        return null; // simplified: real restoration requires stronger heuristics and is skipped here
+        const textCandidates = [];
+        try {
+            const caption = (postElement.querySelector('[data-testid="post_message"]') || postElement).textContent || '';
+            if (caption) textCandidates.push(caption.slice(0, 200));
+        } catch (e) {}
+
+        // Read stored postIdMap and attempt to match by numeric id inside hrefs or by id presence
+        return new Promise((resolve) => {
+            try {
+                chrome.storage.local.get(['postIdMap'], (res) => {
+                    const map = (res && res.postIdMap) ? res.postIdMap : {};
+                    // If no stored map, nothing to restore
+                    if (!map || Object.keys(map).length === 0) return resolve(null);
+
+                    // First, try direct numeric id matches: if any stored stable:<id> appears inside hrefs
+                    const storedKeys = Object.keys(map);
+                    for (const key of storedKeys) {
+                        const meta = map[key] || {};
+                        // If stored fingerprint includes hosts, try direct host match
+                        if (meta.hosts && meta.hosts.length > 0) {
+                            for (const host of meta.hosts) {
+                                for (const h of hrefs) {
+                                    try { const uh = new URL(h); if (uh.hostname === host) return resolve(key); } catch {};
+                                }
+                            }
+                        }
+                        const idMatch = key.match(/^stable:(\d+)$/);
+                        if (idMatch) {
+                            const id = idMatch[1];
+                            for (const h of hrefs) {
+                                if (h.includes(id)) return resolve(key);
+                            }
+                        }
+                    }
+
+                    // Second, try more fuzzy matching: if any numeric chunk from href matches stored id
+                    const numericChunks = new Set();
+                    hrefs.forEach(h => {
+                        const chunks = h.match(/(\d{6,})/g) || [];
+                        chunks.forEach(c => numericChunks.add(c));
+                    });
+                    for (const key of storedKeys) {
+                        const idMatch = key.match(/(\d{6,})/);
+                        if (idMatch && numericChunks.has(idMatch[1])) return resolve(key);
+                    }
+
+                    // Third, try matching by short fingerprint: hostname + first path segment
+                    const hrefSigns = hrefs.map(h => {
+                        try { const u = new URL(h); return `${u.hostname}${u.pathname.split('/').filter(Boolean)[0]||''}`; } catch { return null; }
+                    }).filter(Boolean);
+                    for (const key of storedKeys) {
+                        for (const sign of hrefSigns) {
+                            if (key.includes(sign)) return resolve(key);
+                        }
+                    }
+
+                    // No match
+                    return resolve(null);
+                });
+            } catch (e) { return resolve(null); }
+        });
     } catch (e) { return null; }
 }
+
+// On load, rehydrate stored mappings by scanning existing posts and attaching known IDs
+function rehydrateStoredPostIds() {
+    try {
+        chrome.storage.local.get(['postIdMap'], async (res) => {
+            const map = (res && res.postIdMap) ? res.postIdMap : {};
+            if (!map || Object.keys(map).length === 0) return;
+            const posts = getFacebookPostElements();
+            const restorePromises = posts.map(async (el) => {
+                try {
+                    if (el.dataset.phishingPostId) return;
+                    const restored = await restorePostIdIfPresent(el);
+                    if (restored) {
+                        el.dataset.phishingPostId = restored;
+                    }
+                } catch (e) {}
+            });
+            await Promise.all(restorePromises);
+        });
+    } catch (e) {}
+}
+
+// Run rehydration on load
+try { rehydrateStoredPostIds(); } catch (e) {}
 
 // Function to scan the current page for posts and send to background script
 async function scanAndSendPosts() {
