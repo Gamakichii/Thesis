@@ -155,6 +155,16 @@ def load_models():
         print(f"❌ Error loading models: {e}")
 
 
+# Normalize incoming post_id values to match training keys
+def normalize_post_id(post_id):
+    try:
+        if post_id is None:
+            return None
+        return re.sub(r'^(?:stable:|post:)', '', str(post_id))
+    except Exception:
+        return post_id
+
+
 # Load models at startup
 load_models()
 
@@ -354,6 +364,8 @@ def predict():
     
     data = request.get_json()
     url, post_id = data.get('url'), data.get('post_id')
+    # Normalize post id prefixes sent from the client (e.g., 'stable:123' or 'post:123')
+    post_id = normalize_post_id(post_id)
     if not url or not post_id:
         return jsonify({'error': 'Missing "url" or "post_id"'}), 400
 
@@ -416,7 +428,8 @@ def predict_batch():
 
     try:
         urls = [it.get('url') for it in items]
-        post_ids = [it.get('post_id') for it in items]
+        # Normalize post ids in batch to match training keys
+        post_ids = [normalize_post_id(it.get('post_id')) for it in items]
 
         # 1. Content Scores (vectorized)
         feats = extract_features_for_urls(urls)
