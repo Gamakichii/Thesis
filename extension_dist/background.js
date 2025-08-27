@@ -17,7 +17,8 @@ import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnap
   };
   const initialAuthToken = null; // keep null; we use anonymous auth
   // Backend API base URL (can be overridden via `chrome.storage.sync` key `api_base_url`)
-  const DEFAULT_API_BASE_URL = "https://dakugumen-thesis-qxtmk.ondigitalocean.app"; // your container URL
+  const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000";
+  //"https://dakugumen-thesis-qxtmk.ondigitalocean.app"; // your container URL
   // "https://dakugumen-api.mangosea-8f507dd6.southeastasia.azurecontainerapps.io"; // your container URL
   let API_BASE_URL = DEFAULT_API_BASE_URL;
 
@@ -454,16 +455,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // Message from popup to scan the current active tab
         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
             if (tabs[0]) {
-                // Send a message to the content script in the active tab to initiate scanning
-                chrome.tabs.sendMessage(tabs[0].id, { action: "scanPageFromBackground" }, (response) => {
-                    if (chrome.runtime.lastError) {
-                        console.error("Error sending message to content script:", chrome.runtime.lastError.message);
-                        sendResponse({ status: "error", message: "Could not inject content script. Make sure you are on a Facebook page." });
-                        return;
-                    }
-                    console.log("Scan initiated on active tab:", tabs[0].url, response);
-                    sendResponse({ status: "success", message: "Scan initiated on Facebook page." });
-                });
+                // Send a message to the content script in the active tab to initiate scanning (safe send)
+                safeSendMessageToTab(tabs[0].id, { action: "scanPageFromBackground" });
+                console.log("Scan initiated on active tab:", tabs[0].url);
+                sendResponse({ status: "success", message: "Scan initiated on Facebook page." });
             } else {
                 sendResponse({ status: "error", message: "No active tab found." });
             }
@@ -483,18 +478,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 }
 
                 // Send message back to content script to blur the post (mark as auto-detected)
-                chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-                    if (tabs[0]) {
-                        chrome.tabs.sendMessage(tabs[0].id, { action: "blurPost", postId: post.id, autoDetected: true });
-                    }
-                });
+                safeSendMessageToActiveTab({ action: "blurPost", postId: post.id, autoDetected: true });
             } else {
                 // Unblur if previously blurred by a heuristic (now disabled) or prior run
-                chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-                    if (tabs[0]) {
-                        chrome.tabs.sendMessage(tabs[0].id, { action: "unblurPost", postId: post.id });
-                    }
-                });
+                safeSendMessageToActiveTab({ action: "unblurPost", postId: post.id });
             }
             // Enqueue borderline predictions for review
             try {
@@ -673,6 +660,41 @@ function ensureContentScriptAndScan(tabId) {
     } catch (e) {
         console.warn('ensureContentScriptAndScan error', e);
     }
+}
+
+// Safe send: try to send a message to a tab, inject content script and retry once if the receiving end isn't present
+function safeSendMessageToTab(tabId, message, retry = true) {
+    try {
+        chrome.tabs.sendMessage(tabId, message, (resp) => {
+            if (chrome.runtime.lastError) {
+                console.warn('safeSendMessageToTab: sendMessage error:', chrome.runtime.lastError.message);
+                if (retry) {
+                    // Try to inject content script and retry once
+                    try {
+                        chrome.scripting.executeScript({ target: { tabId }, files: ["content_script.js"] }, () => {
+                            setTimeout(() => {
+                                try { chrome.tabs.sendMessage(tabId, message, () => {}); } catch (e) {}
+                            }, 200);
+                        });
+                    } catch (e) {
+                        console.warn('safeSendMessageToTab: injection failed', e);
+                    }
+                }
+            }
+        });
+    } catch (e) {
+        console.warn('safeSendMessageToTab exception', e);
+    }
+}
+
+function safeSendMessageToActiveTab(message) {
+    try {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            if (tabs && tabs[0] && tabs[0].id) {
+                safeSendMessageToTab(tabs[0].id, message);
+            }
+        });
+    } catch (e) { console.warn('safeSendMessageToActiveTab error', e); }
 }
 
 // Auto-scan: trigger scans on tab activation, tab updates, and SPA navigations
