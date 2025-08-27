@@ -488,15 +488,27 @@ def report():
         except Exception:
             label_val = None
         # Persist doc with normalized payload and label
-        col.add({
+        # Extract optional fingerprint metadata (if provided by clients) and store both raw and indexed hosts
+        fingerprint = payload.get('fingerprint') if isinstance(payload, dict) else None
+        fingerprint_hosts = None
+        try:
+            if fingerprint and isinstance(fingerprint, dict):
+                fingerprint_hosts = fingerprint.get('hosts') or None
+        except Exception:
+            fingerprint_hosts = None
+
+        doc_data = {
             'type': rtype,
             'payload': payload,
             'userId': user_id,
             'url': payload.get('url'),
             'postId': payload.get('postId'),
             'label': label_val,
+            'fingerprint': fingerprint,
+            'fingerprint_hosts': fingerprint_hosts,
             'timestamp': firestore.SERVER_TIMESTAMP
-        })
+        }
+        col.add(doc_data)
         return jsonify({'status': 'ok'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -532,7 +544,17 @@ def report_bulk():
                 label_val = 1 if rtype in ('true_positive', 'false_negative') else 0
             except Exception:
                 label_val = None
-            col.add({'type': rtype, 'payload': payload, 'userId': user_id, 'url': payload.get('url'), 'postId': payload.get('postId'), 'label': label_val, 'timestamp': firestore.SERVER_TIMESTAMP})
+            # Extract optional fingerprint metadata (if provided by clients) and store both raw and indexed hosts
+            fingerprint = payload.get('fingerprint') if isinstance(payload, dict) else None
+            fingerprint_hosts = None
+            try:
+                if fingerprint and isinstance(fingerprint, dict):
+                    fingerprint_hosts = fingerprint.get('hosts') or None
+            except Exception:
+                fingerprint_hosts = None
+
+            doc_data = {'type': rtype, 'payload': payload, 'userId': user_id, 'url': payload.get('url'), 'postId': payload.get('postId'), 'label': label_val, 'fingerprint': fingerprint, 'fingerprint_hosts': fingerprint_hosts, 'timestamp': firestore.SERVER_TIMESTAMP}
+            col.add(doc_data)
             written += 1
         return jsonify({'status': 'ok', 'written': written})
     except Exception as e:
