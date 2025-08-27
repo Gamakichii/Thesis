@@ -687,8 +687,41 @@ def debug_recent_reports():
             label = dd.get('label') if 'label' in dd else (1 if rtype in ('true_positive', 'false_negative') else 0)
             counts_by_type[rtype] = counts_by_type.get(rtype, 0) + 1
             counts_by_label[str(label) if label is not None else 'null'] = counts_by_label.get(str(label), 0) + 1
-            items.append({ 'id': d.id, 'type': rtype, 'label': label, 'url': dd.get('url') or payload.get('url'), 'postId': dd.get('postId') or payload.get('postId'), 'payload': payload, 'ts': dd.get('timestamp') })
+            items.append({ 'id': d.id, 'type': rtype, 'label': label, 'url': dd.get('url') or payload.get('url'), 'postId': dd.get('postId') or payload.get('postId'), 'payload': payload, 'ts': dd.get('timestamp'), 'fingerprint_hosts': dd.get('fingerprint_hosts') or (payload.get('fingerprint') and payload.get('fingerprint').get('hosts')) })
         return jsonify({ 'count': len(items), 'by_type': counts_by_type, 'by_label': counts_by_label, 'items': items })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/debug/fingerprint_matches', methods=['GET'])
+def debug_fingerprint_matches():
+    """Return aggregated counts of fingerprint_hosts occurrences to help visualize common fingerprints."""
+    if not _fs_ok():
+        return jsonify({'error': 'Firestore not configured on server'}), 500
+    try:
+        # Optional query param: ?limit_hosts=50
+        try:
+            limit_hosts = int(request.args.get('limit_hosts', '50'))
+        except Exception:
+            limit_hosts = 50
+
+        col = fs_db.collection(f"artifacts/ads-phishing-link/private_user_reports")
+        # Query recent N reports and aggregate hosts client-side (Firestore aggregation queries require v1 Beta features)
+        docs = list(col.order_by('timestamp', direction=firestore.Query.DESCENDING).limit(1000).stream())
+        host_counts = {}
+        total = 0
+        for d in docs:
+            dd = d.to_dict() or {}
+            hosts = dd.get('fingerprint_hosts') or (dd.get('payload') and dd.get('payload').get('fingerprint') and dd.get('payload').get('fingerprint').get('hosts')) or []
+            if not hosts:
+                continue
+            for h in hosts:
+                host_counts[h] = host_counts.get(h, 0) + 1
+                total += 1
+
+        # Convert to list sorted by count
+        items = sorted([{'host': h, 'count': c} for h, c in host_counts.items()], key=lambda x: -x['count'])[:limit_hosts]
+        return jsonify({'total_hosts_counted': total, 'top_hosts': items})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
