@@ -23,6 +23,27 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__)
 CORS(app, origins=["*"])  # Allow all origins for Chrome extension
 
+# Endpoint to fetch flagged links for the extension
+@app.route('/flagged_links', methods=['GET'])
+def flagged_links():
+    if not _fs_ok():
+        return jsonify({'error': 'Firestore not configured on server'}), 500
+    app_id = request.args.get('app_id', 'ads-phishing-link')
+    try:
+        col = fs_db.collection(f"artifacts/{app_id}/public/data/flagged_phishing_links")
+        docs = list(col.order_by('timestamp', direction=firestore.Query.DESCENDING).limit(100).stream())
+        links = []
+        for d in docs:
+            dd = d.to_dict()
+            links.append({
+                'url': dd.get('url'),
+                'userId': dd.get('userId'),
+                'timestamp': str(dd.get('timestamp')) if dd.get('timestamp') else None
+            })
+        return jsonify({'links': links})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 # Azure Container App will inject PORT
 PORT = int(os.environ.get("PORT", 8000))
 
